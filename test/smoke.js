@@ -248,6 +248,65 @@ async function run() {
   employees.remove(idC);
   db.get().prepare("DELETE FROM attendance_logs WHERE user_pin = '3'").run();
 
+  // Shift yang masih berjalan: sudah masuk tapi jam pulang belum tiba = hadir, bukan tidak lengkap.
+  eq('shift berjalan: sudah masuk, belum jam pulang -> Hadir',
+    statusPada(idA, '2026-03-04', new Date(2026, 2, 4, 10, 0)), 'H');
+  eq('shift berjalan: label menyebut belum pulang',
+    computeRange({ from: '2026-03-04', to: '2026-03-04', employeeIds: [idA], now: new Date(2026, 2, 4, 10, 0) }).rows[0].status_label,
+    'Hadir (belum pulang)');
+  eq('shift berjalan: lewat jam pulang tanpa scan pulang -> Tidak Lengkap',
+    statusPada(idA, '2026-03-04', new Date(2026, 2, 4, 20, 0)), 'TL');
+  const logMalam = insertLogs(null, [{ userId: '2', timestamp: new Date(2026, 2, 4, 21, 55, 0) }], 'tarik');
+  eq('shift malam kemarin masih berjalan dini hari -> Hadir',
+    statusPada(idB, '2026-03-04', new Date(2026, 2, 5, 2, 0)), 'H');
+  eq('shift malam kemarin selesai tanpa scan pulang -> Tidak Lengkap',
+    statusPada(idB, '2026-03-04', new Date(2026, 2, 5, 9, 0)), 'TL');
+  eq('shift malam kemarin belum scan, masih berjalan -> Belum (bukan Alpha)',
+    statusPada(idB, '2026-03-05', new Date(2026, 2, 6, 3, 0)), '-');
+  eq('shift malam kemarin belum scan, sudah selesai -> Alpha',
+    statusPada(idB, '2026-03-05', new Date(2026, 2, 6, 9, 0)), 'A');
+  check('log malam uji tersimpan', logMalam.inserted === 1);
+  db.get().prepare("DELETE FROM attendance_logs WHERE ts = '2026-03-04 21:55:00'").run();
+
+  // Jenis izin "dihitung hadir" (Dinas Luar) ikut menambah hadir di rekap.
+  const jenisDL = leaveTypes.list().find((t) => t.code === 'DL');
+  const izinDL = leaves.create({ employee_id: idA, leave_type_id: jenisDL.id, start_date: '2026-03-10', end_date: '2026-03-10' });
+  const rekapDL = reports.range({ from: '2026-03-10', to: '2026-03-10', employeeIds: [idA] }).summary[0];
+  eq('dihitung hadir: dinas luar tetap tercatat', rekapDL.dinas_luar, 1);
+  eq('dihitung hadir: ikut menambah hadir', rekapDL.hadir, 1);
+  eq('dihitung hadir: status tetap Dinas Luar', reports.range({ from: '2026-03-10', to: '2026-03-10', employeeIds: [idA] }).rows[0].status_label, 'Dinas Luar');
+  eq('dihitung hadir: dashboard ikut menghitung hadir', reports.dashboard('2026-03-10').hadir >= 1, true);
+  leaves.remove(izinDL);
+
+  // Kode jenis izin tidak boleh sama dengan kode status rekap.
+  let kodeDitolak = null;
+  try {
+    leaveTypes.create({ code: 'a', name: 'Absen Khusus' });
+  } catch (err) {
+    kodeDitolak = err.message;
+  }
+  check('jenis izin: kode status rekap ditolak', /dipakai sebagai kode status/.test(kodeDitolak || ''), kodeDitolak);
+  const idCB = leaveTypes.create({ code: 'CB', name: 'Cuti Besar', is_paid: 1, color: '#123456' });
+  const izinCB = leaves.create({ employee_id: idA, leave_type_id: idCB, start_date: '2026-03-10', end_date: '2026-03-10' });
+  eq('jenis izin buatan sendiri masuk kolom izin lain',
+    reports.range({ from: '2026-03-10', to: '2026-03-10', employeeIds: [idA] }).summary[0].izin_lain, 1);
+  leaves.remove(izinCB);
+
+  // Mengubah jenis izin dari tampilan: kode, nama, pilihan, warna.
+  leaveTypes.update(idCB, { code: 'CBS', name: 'Cuti Besar Tahunan', counts_as_present: 0, is_paid: 1, color: '#123456' });
+  const cbBaru = leaveTypes.list().find((t) => t.id === idCB);
+  eq('ubah jenis izin: kode berubah', cbBaru.code, 'CBS');
+  eq('ubah jenis izin: nama berubah', cbBaru.name, 'Cuti Besar Tahunan');
+  eq('ubah jenis izin: warna dipertahankan', cbBaru.color, '#123456');
+  let ubahDitolak = false;
+  try {
+    leaveTypes.update(idCB, { code: 'T', name: 'Tes' });
+  } catch {
+    ubahDitolak = true;
+  }
+  check('ubah jenis izin: kode status rekap ditolak', ubahDitolak);
+  leaveTypes.remove(idCB);
+
   // Kartu RFID 10 digit melewati 2^31 dan tetap harus bisa dikirim ke mesin.
   const zkKartu = new ZKClient({ ip: '127.0.0.1' });
   zkKartu.userPacketSize = 72;

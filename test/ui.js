@@ -532,6 +532,21 @@ app.whenReady().then(async () => {
     problems.push(`uji PIN: ${err.message}`);
   }
 
+  // Jenis izin bisa diubah dari tampilan.
+  await langkah('jenis izin: tombol Ubah membuka form berisi data lama', `
+    window.App.go('leaves'); await tunggu(900);
+    // Dibuka dua kali: pendengar klik dari dialog pertama tidak boleh ikut aktif.
+    document.getElementById('btnTypes').click(); await tunggu(900);
+    window.App.closeModal(null); await tunggu(600);
+    document.getElementById('btnTypes').click(); await tunggu(900);
+    const ubah = document.querySelector('#modal [data-type-edit]');
+    if (!ubah) return 'tombol Ubah tidak ada';
+    ubah.click(); await tunggu(900);
+    const judul = document.querySelector('#modal h3').textContent;
+    const kode = document.getElementById('f_code').value;
+    window.App.closeModal(null); await tunggu(900); window.App.closeModal(null);
+    return judul.startsWith('Ubah Jenis Izin') && kode ? 'ok' : 'judul ' + judul + ', kode ' + kode;`);
+
   console.log('');
   if (problems.length) {
     console.log('MASALAH DITEMUKAN:');

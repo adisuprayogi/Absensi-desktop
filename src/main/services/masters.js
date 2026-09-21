@@ -358,6 +358,19 @@ function normalizeShift(d) {
 
 // -------------------------------------------------------- izin, cuti, dll
 
+/** Kode yang sudah dipakai status rekap; jenis izin tidak boleh memakainya. */
+const KODE_STATUS_REKAP = ['H', 'T', 'TL', 'A', 'L', 'LN', '-'];
+
+function normalizeLeaveType(d) {
+  const code = String(d.code || '').trim().toUpperCase();
+  const name = String(d.name || '').trim();
+  if (!code || !name) throw new Error('Kode dan nama jenis izin wajib diisi.');
+  if (KODE_STATUS_REKAP.includes(code)) {
+    throw new Error(`Kode "${code}" sudah dipakai sebagai kode status rekap (${KODE_STATUS_REKAP.join(', ')}). Pilih kode lain.`);
+  }
+  return [code, name, d.counts_as_present ? 1 : 0, d.is_paid ? 1 : 0, d.color || '#8b5cf6'];
+}
+
 const leaveTypes = {
   list() {
     return db.get().prepare('SELECT * FROM leave_types ORDER BY name').all();
@@ -366,26 +379,13 @@ const leaveTypes = {
     const info = db.get().prepare(`
       INSERT INTO leave_types (code, name, counts_as_present, is_paid, color)
       VALUES (?, ?, ?, ?, ?)
-    `).run(
-      String(d.code || '').trim().toUpperCase(),
-      String(d.name || '').trim(),
-      d.counts_as_present ? 1 : 0,
-      d.is_paid ? 1 : 0,
-      d.color || '#8b5cf6'
-    );
+    `).run(...normalizeLeaveType(d));
     return info.lastInsertRowid;
   },
   update(id, d) {
     db.get().prepare(`
       UPDATE leave_types SET code=?, name=?, counts_as_present=?, is_paid=?, color=? WHERE id=?
-    `).run(
-      String(d.code || '').trim().toUpperCase(),
-      String(d.name || '').trim(),
-      d.counts_as_present ? 1 : 0,
-      d.is_paid ? 1 : 0,
-      d.color || '#8b5cf6',
-      id
-    );
+    `).run(...normalizeLeaveType(d), id);
     return true;
   },
   remove(id) {

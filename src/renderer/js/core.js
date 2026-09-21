@@ -186,7 +186,13 @@ window.App = (function () {
       prev(null);
     }
     const backdrop = $('#modalBackdrop');
-    const box = $('#modal');
+    // Elemen kotak dialog diganti baru setiap kali: pendengar klik yang dipasang
+    // dialog sebelumnya (mis. box.addEventListener di onOpen) ikut terbuang.
+    // Tanpa ini, membuka dialog yang sama dua kali membuat satu klik
+    // menjalankan tindakannya dua kali.
+    const lama = $('#modal');
+    const box = lama.cloneNode(false);
+    lama.replaceWith(box);
     box.className = `modal${wide ? ' wide' : ''}`;
     box.innerHTML = `
       <div class="modal-head">

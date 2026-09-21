@@ -167,7 +167,6 @@ function computeRange({
 
   // ---- susun baris rekap
   const today = toDateStr(now);
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const dates = dateRange(from, to);
   const rows = [];
 
@@ -209,9 +208,13 @@ function computeRange({
 
       const inPunch = punches.length ? punches[0] : null;
       const outPunch = punches.length > 1 ? punches[punches.length - 1] : null;
+      // Shift yang jam pulangnya belum lewat (termasuk shift malam kemarin yang
+      // berakhir pagi ini): belum pulang atau belum scan belum tentu masalah.
+      let shiftBerjalan = false;
 
       if (shift && !shift.is_off) {
         const b = shiftBounds(shift);
+        shiftBerjalan = now.getTime() < parseDateTime(date).getTime() + b.end * 60000;
 
         // Satu scan saja: tebak masuk atau pulang dari posisinya di rentang shift.
         let effectiveIn = inPunch;
@@ -257,9 +260,7 @@ function computeRange({
         setStatus(row, STATUS.HADIR);
         row.status_label = holidayName ? 'Hadir (Libur Nasional)' : 'Hadir (Hari Libur)';
       } else if (leave && !punches.length) {
-        row.status = leave.code;
-        row.status_label = leave.name;
-        row.status_color = leave.color || '#8b5cf6';
+        applyLeave(row, leave);
       } else if (holidayName && !punches.length) {
         setStatus(row, STATUS.LIBUR_NASIONAL);
         row.status_label = holidayName;
@@ -267,17 +268,18 @@ function computeRange({
         setStatus(row, STATUS.LIBUR);
       } else if (row.check_in && row.check_out) {
         setStatus(row, row.late_minutes > 0 ? STATUS.TERLAMBAT : STATUS.HADIR);
+      } else if (row.check_in && !row.check_out && shiftBerjalan) {
+        // Sudah masuk, jam pulang belum tiba: hadir, bukan "tidak lengkap".
+        setStatus(row, row.late_minutes > 0 ? STATUS.TERLAMBAT : STATUS.HADIR);
+        row.status_label += ' (belum pulang)';
+        row.in_progress = true;
       } else if (row.check_in || row.check_out) {
         setStatus(row, STATUS.TIDAK_LENGKAP);
       } else if (date > today) {
         setStatus(row, STATUS.BELUM);
-      } else if (date === today && !leave && nowMinutes < shiftBounds(shift).end) {
-        // Shift hari ini belum selesai: belum scan bukan berarti alpha.
+      } else if (shiftBerjalan) {
+        // Shift belum selesai: belum scan bukan berarti alpha.
         setStatus(row, STATUS.BELUM);
-      } else if (leave) {
-        row.status = leave.code;
-        row.status_label = leave.name;
-        row.status_color = leave.color || '#8b5cf6';
       } else {
         setStatus(row, STATUS.ALPHA);
       }
@@ -299,6 +301,19 @@ function checkRange(from, to) {
   if (dateRange(from, to).length > MAX_RANGE_DAYS) {
     throw new Error(`Rentang rekap maksimal ${MAX_RANGE_DAYS} hari.`);
   }
+}
+
+/**
+ * Status dari izin/cuti yang disetujui. Ditandai `is_leave` supaya ringkasan
+ * tidak bergantung pada kodenya — kode buatan pengguna bisa saja sama dengan
+ * kode status rekap.
+ */
+function applyLeave(row, leave) {
+  row.status = leave.code;
+  row.status_label = leave.name;
+  row.status_color = leave.color || '#8b5cf6';
+  row.is_leave = true;
+  row.leave_counts_present = !!leave.counts_as_present;
 }
 
 function setStatus(row, s) {
@@ -341,6 +356,14 @@ function summarize(rows) {
     s.work_minutes += r.work_minutes;
     s.overtime_minutes += r.overtime_minutes;
 
+    if (r.is_leave) {
+      // Jenis izin bertanda "dihitung hadir" (mis. Dinas Luar) ikut menambah hadir.
+      if (r.leave_counts_present) s.hadir += 1;
+      const kolom = { C: 'cuti', S: 'sakit', I: 'izin', DL: 'dinas_luar' }[r.leave_code] || 'izin_lain';
+      s[kolom] += 1;
+      continue;
+    }
+
     switch (r.status) {
       case 'H':
         s.hadir += 1;
@@ -359,22 +382,7 @@ function summarize(rows) {
       case 'LN':
         s.libur += 1;
         break;
-      case '-':
-        break;
-      case 'C':
-        s.cuti += 1;
-        break;
-      case 'S':
-        s.sakit += 1;
-        break;
-      case 'I':
-        s.izin += 1;
-        break;
-      case 'DL':
-        s.dinas_luar += 1;
-        break;
       default:
-        s.izin_lain += 1;
         break;
     }
   }
@@ -423,6 +431,11 @@ const reports = {
       alpha: 0,
     };
     for (const r of rows) {
+      if (r.is_leave) {
+        if (r.leave_counts_present) stat.hadir += 1;
+        else stat.izin_cuti += 1;
+        continue;
+      }
       if (r.status === 'H') stat.hadir += 1;
       else if (r.status === 'T') {
         stat.hadir += 1;
@@ -431,7 +444,6 @@ const reports = {
       else if (r.status === 'A') stat.alpha += 1;
       else if (r.status === 'L' || r.status === 'LN') stat.libur += 1;
       else if (r.status === '-') stat.belum_absen += 1;
-      else stat.izin_cuti += 1;
     }
 
     const scans = db.get().prepare(`

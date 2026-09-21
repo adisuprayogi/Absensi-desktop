@@ -276,12 +276,13 @@ untuk satu regu dengan **"Geser titik awal pola"** yang berbeda.
 |---|---|
 | Hadir | Scan masuk dan pulang lengkap, tidak melewati toleransi telat |
 | Terlambat | Scan lengkap, tetapi masuk melewati toleransi |
-| Tidak Lengkap | Hanya ada satu scan — lupa absen pulang atau lupa absen masuk |
-| Alpha | Dijadwalkan kerja, tidak ada scan, dan tidak ada izin |
+| Hadir / Terlambat (belum pulang) | Sudah scan masuk, jam pulang shift belum tiba — dihitung hadir |
+| Tidak Lengkap | Hanya ada satu scan setelah jam pulang shift lewat — lupa absen pulang atau lupa absen masuk |
+| Alpha | Dijadwalkan kerja, tidak ada scan, dan tidak ada izin — setelah jam pulang shift lewat |
 | Libur | Jadwalnya libur |
 | Libur Nasional | Tanggal terdaftar sebagai hari libur |
-| Cuti / Sakit / Izin / Dinas Luar | Sesuai data di halaman Izin & Cuti |
-| Belum | Tanggal belum tiba |
+| Cuti / Sakit / Izin / Dinas Luar | Sesuai data di halaman Izin & Cuti. Jenis bertanda "dihitung hadir" (mis. Dinas Luar) ikut menambah jumlah hadir |
+| Belum | Tanggal belum tiba, atau shift belum selesai dan belum ada scan |
 
 ---
 

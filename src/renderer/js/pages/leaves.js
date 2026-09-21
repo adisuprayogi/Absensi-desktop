@@ -64,9 +64,34 @@
     await A.refresh();
   }
 
+  /** Ubah satu jenis izin, lalu kembali ke daftar jenis. */
+  async function editType(t) {
+    const v = await A.formDialog({
+      title: `Ubah Jenis Izin — ${t.name}`,
+      fields: [
+        { name: 'code', label: 'Kode', value: t.code, required: true, row: 'a', attrs: 'maxlength="8"' },
+        { name: 'name', label: 'Nama', value: t.name, required: true, row: 'a' },
+        { name: 'color', label: 'Warna', type: 'color', value: t.color || '#8b5cf6' },
+        {
+          name: 'counts_as_present', label: 'Dihitung sebagai hadir di rekap', type: 'checkbox', value: t.counts_as_present,
+          hint: 'Mis. Dinas Luar: tetap tercatat sebagai dinas, dan ikut menambah jumlah hadir.',
+        },
+        { name: 'is_paid', label: 'Tetap dibayar', type: 'checkbox', value: t.is_paid },
+      ],
+    });
+    if (v) {
+      const ok = await A.callSafe('leaveTypes.update', { id: t.id, ...v });
+      if (ok) A.toast('Jenis izin diperbarui', 'ok');
+    }
+    // Dialog ubah menutup daftar jenis; buka lagi supaya bisa lanjut bekerja.
+    await manageTypes();
+  }
+
   async function manageTypes() {
+    let daftar = [];
     const render = async (box) => {
       const list = await A.call('leaveTypes.list');
+      daftar = list;
       A.$('#typeList', box).innerHTML = list
         .map(
           (t) => `<div class="live-item">
@@ -74,6 +99,7 @@
             <span class="who">${A.esc(t.name)}</span>
             ${t.counts_as_present ? '<span class="badge soft">Dihitung hadir</span>' : ''}
             ${t.is_paid ? '' : '<span class="badge soft">Tanpa gaji</span>'}
+            <button class="btn-sm" data-type-edit="${t.id}">Ubah</button>
             <button class="btn-sm btn-danger" data-type-del="${t.id}">Hapus</button>
           </div>`
         )
@@ -115,6 +141,12 @@
           return undefined;
         });
         box.addEventListener('click', async (e) => {
+          const edit = e.target.closest('[data-type-edit]');
+          if (edit) {
+            const t = daftar.find((x) => String(x.id) === edit.dataset.typeEdit);
+            if (t) await editType(t);
+            return;
+          }
           const del = e.target.closest('[data-type-del]');
           if (!del) return;
           await A.callSafe('leaveTypes.remove', { id: Number(del.dataset.typeDel) });
