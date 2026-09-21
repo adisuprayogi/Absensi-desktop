@@ -2,8 +2,7 @@
 
 (function () {
   const A = window.App;
-  const state = { from: null, to: null, deviceId: '', search: '', unknownOnly: false, page: 0 };
-  const PAGE_SIZE = 200;
+  const state = { from: null, to: null, deviceId: '', search: '', unknownOnly: false };
 
   async function manualForm() {
     const employees = await A.call('employees.list', { activeOnly: true });
@@ -93,6 +92,12 @@
         state.to = A.fmt.today();
       }
 
+      // Log bisa ratusan ribu baris, jadi dipotong di proses utama, bukan di sini.
+      // Tanpa pilihan "Semua": menggambar semuanya sekaligus membuat aplikasi macet.
+      const halaman = A.pageRequest('logs', {
+        sizes: [10, 25, 50, 100, 500],
+        resetOn: [state.from, state.to, state.deviceId, state.search, state.unknownOnly],
+      });
       const [data, devices, stats] = await Promise.all([
         A.call('attendance.list', {
           from: state.from,
@@ -100,8 +105,8 @@
           deviceId: state.deviceId ? Number(state.deviceId) : null,
           search: state.search,
           unknownOnly: state.unknownOnly,
-          limit: PAGE_SIZE,
-          offset: state.page * PAGE_SIZE,
+          limit: halaman.limit,
+          offset: halaman.offset,
         }),
         A.call('devices.list'),
         A.call('attendance.stats'),
@@ -110,9 +115,14 @@
       A.setActions(
         `<button id="btnUnknown">PIN Belum Terdaftar${stats.unknown ? ` (${stats.unknown})` : ''}</button>
          <button id="btnExport">Export Excel</button>
+         <button id="btnPullPeriod">Tarik dari Mesin</button>
          <button class="btn-primary" id="btnManual">+ Scan Manual</button>`,
         {
           '#btnManual': () => manualForm(),
+          // Periode tarik mengikuti filter tanggal yang sedang dipakai di sini.
+          '#btnPullPeriod': async () => {
+            if (await A.pullPeriodDialog({ from: state.from, to: state.to })) await A.refresh();
+          },
           '#btnUnknown': () => showUnknown(),
           '#btnExport': async () => {
             const res = await A.callSafe('export.logsExcel', {
@@ -134,7 +144,6 @@
         `${data.total.toLocaleString('id-ID')} log pada rentang ini • total ${stats.total.toLocaleString('id-ID')} log tersimpan`
       );
 
-      const totalPages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
 
       root.innerHTML = `
         <div class="toolbar">
@@ -183,24 +192,12 @@
               { empty: 'Tidak ada log pada rentang ini. Tarik data dari mesin absensi lebih dulu.' }
             )}
           </div>
-          ${
-            totalPages > 1
-              ? `<div class="card-head" style="border-top:1px solid var(--border);border-bottom:0;justify-content:space-between">
-                  <span class="small muted">Halaman ${state.page + 1} dari ${totalPages}</span>
-                  <div class="pill-row">
-                    <button class="btn-sm" data-act="prev"${state.page === 0 ? ' disabled' : ''}>‹ Sebelumnya</button>
-                    <button class="btn-sm" data-act="next"${state.page >= totalPages - 1 ? ' disabled' : ''}>Berikutnya ›</button>
-                  </div>
-                </div>`
-              : ''
-          }
+          ${A.pagerHtml('logs', data.total)}
         </div>
       `;
 
-      const reset = () => {
-        state.page = 0;
-        A.refresh();
-      };
+      // Kembali ke halaman 1 diurus pager lewat `resetOn`.
+      const reset = () => A.refresh();
       A.$('#from', root).addEventListener('change', (e) => {
         state.from = e.target.value;
         reset();
@@ -225,14 +222,6 @@
       });
 
       A.bindActions(root, {
-        prev: () => {
-          state.page = Math.max(0, state.page - 1);
-          A.refresh();
-        },
-        next: () => {
-          state.page += 1;
-          A.refresh();
-        },
         del: async (d) => {
           const ok = await A.confirm('Hapus log scan ini?', { okLabel: 'Hapus' });
           if (!ok) return;

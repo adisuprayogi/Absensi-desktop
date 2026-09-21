@@ -150,6 +150,7 @@
         { '#btnAdd': () => leaveForm(null), '#btnTypes': () => manageTypes() }
       );
       A.setSubtitle(`${list.length} pengajuan pada rentang tanggal ini`);
+      const hal = A.paginate('leaves', list, { resetOn: [state.from, state.to, state.search] });
 
       root.innerHTML = `
         <div class="toolbar">
@@ -196,10 +197,11 @@
                   </div>`,
                 },
               ],
-              list,
+              hal.rows,
               { empty: 'Belum ada pengajuan izin atau cuti pada rentang ini.' }
             )}
           </div>
+          ${hal.controls}
         </div>
       `;
 

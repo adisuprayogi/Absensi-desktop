@@ -3,6 +3,21 @@
 const db = require('../db');
 const { placeholders } = require('../util/sql');
 
+/**
+ * Apakah dua nama kemungkinan besar orang yang sama. Longgar dengan sengaja:
+ * mesin memotong nama (24 karakter, atau 8 pada firmware lama), dan nama
+ * cadangan "User 25" dari mesin yang namanya kosong bukan tanda orang lain.
+ */
+function samePerson(appName, deviceName) {
+  const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const a = norm(appName);
+  const d = norm(deviceName);
+  if (!d || /^user \d+$/.test(d) || a === d) return true;
+  const pendek = a.length < d.length ? a : d;
+  const panjang = a.length < d.length ? d : a;
+  return pendek.length >= 3 && panjang.startsWith(pendek);
+}
+
 const devices = {
   list() {
     return db.get().prepare(`
@@ -403,4 +418,4 @@ function normalize(d) {
   };
 }
 
-module.exports = { devices };
+module.exports = { devices, samePerson };

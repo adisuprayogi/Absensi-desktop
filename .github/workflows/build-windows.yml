@@ -1,0 +1,65 @@
+# Bangun installer Windows (NSIS, x64) di runner Windows asli, supaya modul
+# native better-sqlite3 dikompilasi untuk Windows + ABI Electron.
+#
+# - Setiap push / pull request ke main: uji, lalu bangun installer dan simpan
+#   sebagai artifact (unduh dari halaman run di tab Actions).
+# - Push tag v* (mis. v1.0.1): installer juga dilampirkan ke GitHub Release.
+# - Bisa dijalankan manual dari tab Actions (workflow_dispatch).
+
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # dibutuhkan untuk membuat GitHub Release saat push tag
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Pasang Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # postinstall menjalankan `electron-builder install-app-deps`, yang
+      # membangun ulang better-sqlite3 untuk Electron di Windows.
+      - name: Pasang dependensi
+        run: npm ci
+
+      - name: Uji protokol dan fungsional
+        run: npm test
+
+      - name: Bangun installer
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Simpan installer sebagai artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Absensi-Karyawan-Setup
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Lampirkan ke GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.exe
+          generate_release_notes: true

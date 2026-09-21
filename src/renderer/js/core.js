@@ -20,9 +20,26 @@ window.App = (function () {
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+  // ------------------------------------------------------ pengguna aktif
+
+  let currentUser = null;
+  let onAuthRequired = null;
+
+  /** Dipasang oleh auth.js: dipanggil bila proses utama menolak karena sesi habis. */
+  function setAuthHandler(fn) {
+    onAuthRequired = fn;
+  }
+
+  /** Catat pengguna yang masuk; kelas di <body> menyembunyikan menu khusus Admin. */
+  function setUser(user) {
+    currentUser = user;
+    document.body.classList.toggle('is-admin', !!user && user.role === 'admin');
+  }
+
   /** Panggil proses utama. Melempar Error bila gagal supaya bisa di-try/catch. */
   async function call(name, payload) {
     const res = await window.api.call(name, payload);
+    if (res && !res.ok && res.code === 'AUTH_REQUIRED' && onAuthRequired) onAuthRequired();
     if (!res || !res.ok) throw new Error((res && res.error) || 'Terjadi kesalahan');
     return res.data;
   }
@@ -348,6 +365,133 @@ window.App = (function () {
     return `<div class="table-wrap"><table class="data ${className}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
   }
 
+  // ------------------------------------------------------- pagination
+
+  /**
+   * Status halaman per tabel, dikenali dari `key`. Disimpan di sini (bukan di
+   * halaman) supaya ukuran halaman yang dipilih pengguna bertahan saat pindah
+   * menu dan kembali lagi.
+   */
+  const pagers = new Map();
+  const DEFAULT_SIZES = [10, 25, 50, 100, 0]; // 0 = semua
+
+  /**
+   * `resetOn` berisi filter tabel: bila berubah, kembali ke halaman 1 — hasil
+   * pencarian baru tidak boleh terbuka di halaman 5 yang mungkin kosong.
+   */
+  function pagerState(key, { size = 10, sizes = DEFAULT_SIZES, resetOn = null, onChange = null } = {}) {
+    let st = pagers.get(key);
+    if (!st) {
+      st = { page: 0, size, total: 0, pages: 1 };
+      pagers.set(key, st);
+    }
+    st.sizes = sizes;
+    if (!sizes.includes(st.size)) st.size = size;
+    st.onChange = onChange;
+    const sig = JSON.stringify(resetOn);
+    if (st.sig !== undefined && st.sig !== sig) st.page = 0;
+    st.sig = sig;
+    return st;
+  }
+
+  const perPage = (st, total) => (st.size > 0 ? st.size : Math.max(total, 1));
+
+  function clampPage(st, total) {
+    st.total = total;
+    st.pages = Math.max(1, Math.ceil(total / perPage(st, total)));
+    st.page = Math.min(Math.max(0, st.page), st.pages - 1);
+  }
+
+  /** Pagination di halaman: seluruh baris sudah ada, tampilkan sepotong. */
+  function paginate(key, rows, opts = {}) {
+    const st = pagerState(key, opts);
+    clampPage(st, rows.length);
+    const n = perPage(st, rows.length);
+    const start = st.page * n;
+    return { rows: rows.slice(start, start + n), controls: pagerHtml(key), start };
+  }
+
+  /**
+   * Pagination di proses utama (data besar, mis. log scan): kembalikan
+   * limit/offset untuk diminta, lalu panggil pagerHtml(key, total).
+   */
+  function pageRequest(key, opts = {}) {
+    const st = pagerState(key, opts);
+    return st.size > 0 ? { limit: st.size, offset: st.page * st.size } : { limit: null, offset: 0 };
+  }
+
+  function pagerHtml(key, total = null) {
+    const st = pagers.get(key);
+    if (total !== null) {
+      const sebelum = st.page;
+      clampPage(st, total);
+      // Halaman yang diminta sudah tidak ada (mis. baris terakhirnya dihapus).
+      if (st.page !== sebelum) setTimeout(() => (st.onChange || refresh)(), 0);
+    }
+    const kecil = Math.min(...st.sizes.filter((s) => s > 0));
+    if (st.total <= kecil) return '';
+
+    const n = perPage(st, st.total);
+    const dari = st.page * n + 1;
+    const sampai = Math.min(st.total, (st.page + 1) * n);
+    const angka = (v) => Number(v).toLocaleString('id-ID');
+    const awal = st.page === 0 ? ' disabled' : '';
+    const akhir = st.page >= st.pages - 1 ? ' disabled' : '';
+    return `<div class="pager" data-pager="${esc(key)}">
+      <span class="pager-info">Menampilkan <strong>${angka(dari)}–${angka(sampai)}</strong> dari ${angka(st.total)}</span>
+      <label class="pager-size">Baris per halaman
+        <select data-pager-size>${st.sizes
+          .map((s) => `<option value="${s}"${s === st.size ? ' selected' : ''}>${s ? s : 'Semua'}</option>`)
+          .join('')}</select>
+      </label>
+      <div class="pager-nav">
+        <button class="btn-sm" data-pager-go="first" title="Halaman pertama"${awal}>«</button>
+        <button class="btn-sm" data-pager-go="prev"${awal}>‹ Sebelumnya</button>
+        <span class="pager-page">Halaman ${angka(st.page + 1)} dari ${angka(st.pages)}</span>
+        <button class="btn-sm" data-pager-go="next"${akhir}>Berikutnya ›</button>
+        <button class="btn-sm" data-pager-go="last" title="Halaman terakhir"${akhir}>»</button>
+      </div>
+    </div>`;
+  }
+
+  // Satu pendengar untuk semua pager, termasuk yang ada di dalam dialog.
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-pager-go]');
+    if (!btn || btn.disabled) return;
+    const st = pagers.get(btn.closest('[data-pager]').dataset.pager);
+    if (!st) return;
+    const arah = btn.dataset.pagerGo;
+    if (arah === 'first') st.page = 0;
+    else if (arah === 'prev') st.page -= 1;
+    else if (arah === 'next') st.page += 1;
+    else if (arah === 'last') st.page = st.pages - 1;
+    (st.onChange || refresh)();
+  });
+  document.addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-pager-size]');
+    if (!sel) return;
+    const st = pagers.get(sel.closest('[data-pager]').dataset.pager);
+    if (!st) return;
+    st.size = Number(sel.value);
+    st.page = 0;
+    (st.onChange || refresh)();
+  });
+
+  /**
+   * Pilihan baris yang bertahan saat pindah halaman. Header "pilih semua"
+   * hanya mencentang baris di halaman yang tampil; tautan di baris aksi
+   * memilih seluruh hasil filter sekaligus.
+   *
+   * @param {Set} set     id yang terpilih (milik halaman pemanggil)
+   * @param {Array} ids   seluruh id hasil filter; pilihan di luar ini dibuang,
+   *                      supaya tindakan massal tidak mengenai baris tersembunyi
+   */
+  function prunePicks(set, ids) {
+    const ada = new Set(ids.map(String));
+    for (const v of [...set]) if (!ada.has(String(v))) set.delete(v);
+    return set;
+  }
+
   function loading(text = 'Memuat data...') {
     return `<div class="loading"><div class="spinner"></div>${esc(text)}</div>`;
   }
@@ -490,6 +634,10 @@ window.App = (function () {
     formHtml, readForm, formDialog,
     table, loading, emptyState,
     registerPage, go, refresh, setSubtitle, setActions, bindActions, busy,
+    setUser, setAuthHandler,
+    paginate, pageRequest, pagerHtml, prunePicks,
+    get user() { return currentUser; },
+    get isAdmin() { return !!currentUser && currentUser.role === 'admin'; },
     get params() { return currentParams; },
     get page() { return currentPage; },
   };

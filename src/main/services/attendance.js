@@ -12,7 +12,7 @@ const { VERIFY_MODE, PUNCH_STATE } = require('../zk/const');
  * detik (jari ditempel dua kali).
  */
 function insertLogs(deviceId, records, source = 'tarik') {
-  if (!records || !records.length) return { inserted: 0, duplicate: 0, unknown: 0 };
+  if (!records || !records.length) return { inserted: 0, duplicate: 0, unknown: 0, corrected: 0 };
 
   const database = db.get();
   const dupWindowRow = database.prepare("SELECT value FROM settings WHERE key = 'duplicate_window'").get();
@@ -31,10 +31,19 @@ function insertLogs(deviceId, records, source = 'tarik') {
     SELECT ts FROM attendance_logs
     WHERE user_pin = ? AND ts BETWEEN ? AND ? LIMIT 1
   `);
+  // Paket realtime tidak selalu membawa mode verifikasi di posisi yang sama
+  // antar firmware, sedangkan log yang tersimpan di memori mesin selalu
+  // benar. Saat scan yang sama ditarik, catatan realtime-nya dikoreksi.
+  const correctRealtime = database.prepare(`
+    UPDATE attendance_logs SET status = ?, punch = ?
+    WHERE device_id IS ? AND user_pin = ? AND ts = ? AND source = 'realtime'
+      AND (status IS NOT ? OR punch IS NOT ?)
+  `);
 
   let inserted = 0;
   let duplicate = 0;
   let unknown = 0;
+  let corrected = 0;
 
   const tx = database.transaction((list) => {
     for (const rec of list) {
@@ -48,6 +57,17 @@ function insertLogs(deviceId, records, source = 'tarik') {
       const logDate = toDateStr(at);
       const employeeId = empByPin.get(pin) || null;
       if (!employeeId) unknown += 1;
+
+      const status = rec.status != null ? rec.status : 0;
+      const punch = rec.punch != null ? rec.punch : 0;
+      if (source === 'tarik') {
+        const fix = correctRealtime.run(status, punch, deviceId, pin, ts, status, punch);
+        if (fix.changes > 0) {
+          corrected += 1;
+          duplicate += 1;
+          continue;
+        }
+      }
 
       if (dupWindow > 0) {
         const lo = toDateTimeStr(new Date(at.getTime() - dupWindow * 1000));
@@ -64,8 +84,8 @@ function insertLogs(deviceId, records, source = 'tarik') {
         employeeId,
         ts,
         logDate,
-        rec.status != null ? rec.status : 0,
-        rec.punch != null ? rec.punch : 0,
+        status,
+        punch,
         source
       );
       if (info.changes > 0) inserted += 1;
@@ -74,7 +94,7 @@ function insertLogs(deviceId, records, source = 'tarik') {
   });
   tx(records);
 
-  return { inserted, duplicate, unknown, fetched: records.length };
+  return { inserted, duplicate, unknown, corrected, fetched: records.length };
 }
 
 const attendance = {

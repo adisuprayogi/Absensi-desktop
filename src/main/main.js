@@ -133,6 +133,8 @@ function buildMenu() {
 app.whenReady().then(async () => {
   try {
     db.init(app.getPath('userData'));
+    // Catatan "pulihkan backup" yang dititipkan sebelum aplikasi dibuka ulang.
+    require('./services/audit').audit.flushPending();
   } catch (err) {
     dialog.showErrorBox(
       'Gagal membuka database',

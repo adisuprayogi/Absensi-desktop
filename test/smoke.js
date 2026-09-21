@@ -140,6 +140,18 @@ async function run() {
   const dupWindow = insertLogs(null, [{ userId: '1', timestamp: new Date(2026, 2, 2, 8, 5, 30) }], 'tarik');
   eq('tap ganda dalam 60 detik diabaikan', dupWindow.inserted, 0);
 
+  // Realtime tercatat "Password" (0) karena posisi byte beda antar firmware;
+  // penarikan berikutnya membawa mode verifikasi resmi dari memori mesin.
+  const scanRt = { userId: '1', timestamp: new Date(2026, 1, 10, 8, 0, 0), status: 0, punch: 0 };
+  insertLogs(null, [scanRt], 'realtime');
+  const koreksi = insertLogs(null, [{ ...scanRt, status: 1 }], 'tarik');
+  eq('tarik mengoreksi mode verifikasi log realtime', koreksi.corrected, 1);
+  eq('koreksi tidak menambah baris baru', koreksi.inserted, 0);
+  const rtRow = db.get().prepare("SELECT status, source FROM attendance_logs WHERE ts = '2026-02-10 08:00:00'").get();
+  eq('log realtime kini tercatat Sidik Jari', rtRow.status, 1);
+  eq('asal log tetap realtime', rtRow.source, 'realtime');
+  db.get().prepare("DELETE FROM attendance_logs WHERE ts = '2026-02-10 08:00:00'").run();
+
   // ==================================================== 4. jadwal & izin
   schedules.setDay(idA, '2026-03-07', allShifts.find((s) => s.is_off).id);
   holidays.create('2026-03-19', 'Hari Raya Nyepi');
@@ -203,6 +215,56 @@ async function run() {
   const dash = reports.dashboard(D);
   eq('dashboard: hadir hari itu', dash.hadir, 2);
   eq('dashboard: jumlah scan', dash.scan_hari_ini, 3);
+
+  // Hari ini: yang belum scan baru jadi Alpha setelah jam pulang shift lewat.
+  const { computeRange } = require('../src/main/services/reports');
+  const statusPada = (empId, date, now) =>
+    computeRange({ from: date, to: date, employeeIds: [empId], now }).rows[0].status;
+  eq('hari ini sebelum shift selesai: belum scan -> Belum',
+    statusPada(idA, '2026-03-05', new Date(2026, 2, 5, 7, 0)), '-');
+  eq('hari ini setelah jam pulang: belum scan -> Alpha',
+    statusPada(idA, '2026-03-05', new Date(2026, 2, 5, 18, 0)), 'A');
+  eq('shift malam hari ini belum dimulai -> Belum',
+    statusPada(idB, '2026-03-05', new Date(2026, 2, 5, 23, 0)), '-');
+
+  // Malam lalu Pagi: scan masuk Pagi tidak boleh direbut shift Malam kemarin.
+  const idC = employees.create({ pin: '3', name: 'Cici Rotasi' });
+  schedules.setDay(idC, '2026-03-09', shiftMalam.id);
+  schedules.setDay(idC, '2026-03-10', shiftPagi.id);
+  insertLogs(null, [
+    { userId: '3', timestamp: new Date(2026, 2, 9, 21, 55, 0) },
+    { userId: '3', timestamp: new Date(2026, 2, 10, 6, 3, 0) },
+    { userId: '3', timestamp: new Date(2026, 2, 10, 7, 55, 0) },
+    { userId: '3', timestamp: new Date(2026, 2, 10, 17, 5, 0) },
+  ], 'tarik');
+  const rotasi = reports.range({ from: '2026-03-09', to: '2026-03-10', employeeIds: [idC] }).rows;
+  const malam = byDate(rotasi, '2026-03-09');
+  const pagi = byDate(rotasi, '2026-03-10');
+  eq('Malam->Pagi: pulang malam tetap 06:03', malam.check_out, '30:03');
+  eq('Malam->Pagi: malam tanpa lembur palsu', malam.overtime_minutes, 0);
+  eq('Malam->Pagi: masuk pagi 07:55 milik hari Pagi', pagi.check_in, '07:55');
+  eq('Malam->Pagi: hari Pagi hadir lengkap', pagi.status, 'H');
+  // Dibersihkan supaya hitungan pada pengujian berikutnya tidak berubah.
+  employees.remove(idC);
+  db.get().prepare("DELETE FROM attendance_logs WHERE user_pin = '3'").run();
+
+  // Kartu RFID 10 digit melewati 2^31 dan tetap harus bisa dikirim ke mesin.
+  const zkKartu = new ZKClient({ ip: '127.0.0.1' });
+  zkKartu.userPacketSize = 72;
+  let kartuBesar = null;
+  try {
+    kartuBesar = zkKartu._packUser({ uid: 1, userId: '9', name: 'X', card: 3000000000 }).readUInt32LE(35);
+  } catch (err) {
+    kartuBesar = err.message;
+  }
+  eq('kartu RFID > 2^31 dikemas utuh', kartuBesar, 3000000000);
+  let kartuDitolak = false;
+  try {
+    employees.create({ pin: 'KARTU', name: 'Kartu Kebesaran', card: 5000000000 });
+  } catch {
+    kartuDitolak = true;
+  }
+  check('kartu RFID melewati 32 bit ditolak saat simpan', kartuDitolak);
 
   // ================================================ 6. jadwal massal
   const gen = schedules.generate({
@@ -732,6 +794,228 @@ async function run() {
     await mgr.shutdown();
     await mesin.close();
     devices.remove(devHapus);
+  }
+
+  // ======================== 8d. tarik per periode & rekap rentang tanggal
+  {
+    const { MockDevice } = require('./mock-device');
+    const { DeviceManager } = require('../src/main/zk/manager');
+
+    // Periode gaji 21 Agustus - 20 September; dua scan di luarnya.
+    const scan = (bln, tgl, jam) => ({ uid: 1, userId: '1', timestamp: new Date(2026, bln, tgl, jam, 0, 0), status: 1, punch: 0 });
+    const mesin = new MockDevice({
+      users: [{ uid: 1, userId: '1', name: 'Ani Pagi', privilege: 0 }],
+      attendance: [scan(7, 20, 8), scan(7, 21, 8), scan(8, 1, 8), scan(8, 20, 17), scan(8, 21, 8)],
+    });
+    const portMesin = await mesin.listen();
+    const devPeriode = devices.create({ name: 'Mesin Periode', ip: '127.0.0.1', port: portMesin });
+    const mgr = new DeviceManager();
+
+    const tarik = await mgr.pull(devPeriode, { from: '2026-08-21', to: '2026-09-20' });
+    check('tarik periode: berhasil', tarik.ok, tarik.error || '');
+    eq('tarik periode: seluruh log mesin terbaca', tarik.onDevice, 5);
+    eq('tarik periode: hanya yang dalam periode disimpan', tarik.inserted, 3);
+    eq('tarik periode: yang di luar periode dilaporkan', tarik.outOfRange, 2);
+    const tersimpan = db.get()
+      .prepare('SELECT MIN(log_date) AS a, MAX(log_date) AS b, COUNT(*) AS n FROM attendance_logs WHERE device_id = ?')
+      .get(devPeriode);
+    eq('tarik periode: tanggal paling awal', tersimpan.a, '2026-08-21');
+    eq('tarik periode: tanggal paling akhir (inklusif)', tersimpan.b, '2026-09-20');
+
+    let periodeTerbalik = null;
+    try {
+      mgr.pull(devPeriode, { from: '2026-09-20', to: '2026-08-21' });
+    } catch (err) {
+      periodeTerbalik = err.message;
+    }
+    check('tarik periode: tanggal terbalik ditolak', /tidak boleh setelah/.test(periodeTerbalik || ''), periodeTerbalik);
+
+    // Rekap rentang tanggal melintasi dua bulan.
+    const rentang = reports.range({ from: '2026-08-21', to: '2026-09-20', employeeIds: [idA] });
+    eq('rekap rentang: jumlah hari 21 Agu - 20 Sep', rentang.dates.length, 31);
+    eq('rekap rentang: hari pertama', rentang.dates[0], '2026-08-21');
+    check('rekap rentang: ringkasan satu karyawan', rentang.summary.length === 1 && rentang.summary[0].employee_id === idA);
+    let rentangSalah = null;
+    try {
+      reports.range({ from: '2026-01-01', to: '2027-06-01' });
+    } catch (err) {
+      rentangSalah = err.message;
+    }
+    check('rekap rentang: lebih dari setahun ditolak', /maksimal/.test(rentangSalah || ''), rentangSalah);
+
+    const exporterRentang = require('../src/main/services/exporter');
+    const xlsxRentang = path.join(tmp, 'rentang.xlsx');
+    await exporterRentang.monthlyExcel(xlsxRentang, { from: '2026-08-21', to: '2026-09-20' });
+    check('Excel rekap rentang dibuat', fs.existsSync(xlsxRentang) && fs.statSync(xlsxRentang).size > 4000);
+    const htmlRentang = exporterRentang.monthlyPdfHtml({ from: '2026-08-21', to: '2026-09-20' });
+    check('PDF rekap rentang menyebut periodenya',
+      htmlRentang.includes('Rekap Absensi Periode') && htmlRentang.includes('21 Agustus 2026 s/d 20 September 2026'));
+    const kartuRentang = exporterRentang.employeeCardPdfHtml({ employeeId: idA, from: '2026-08-21', to: '2026-09-20' });
+    check('kartu absensi rentang menyebut periodenya', kartuRentang.includes('21 Agustus 2026 s/d 20 September 2026'));
+
+    await mgr.shutdown();
+    await mesin.close();
+    db.get().prepare('DELETE FROM attendance_logs WHERE device_id = ?').run(devPeriode);
+    devices.remove(devPeriode);
+  }
+
+  // ============================= 8d2. event realtime yang dikirim berulang
+  {
+    const { MockDevice } = require('./mock-device');
+    const { DeviceManager } = require('../src/main/zk/manager');
+    const mesin = new MockDevice({ users: [], attendance: [], ignoreAcks: true });
+    const portMesin = await mesin.listen();
+    const devRt = devices.create({ name: 'Mesin Bandel', ip: '127.0.0.1', port: portMesin, live_capture: 1 });
+    const mgr = new DeviceManager();
+    const feed = [];
+    mgr.on('live-scan', (ev) => feed.push(ev));
+    const mulai = await mgr.startLive(devRt);
+    check('realtime berulang: live capture tersambung', mulai.ok, mulai.error || '');
+    mesin.pushScan({ userId: '1', timestamp: new Date(2026, 8, 21, 14, 52, 23) });
+    await new Promise((r) => setTimeout(r, 450));
+    check('realtime berulang: mesin memang mengirim ulang', mesin.liveResends >= 3, `${mesin.liveResends} kali`);
+    eq('realtime berulang: feed Dashboard hanya menerima sekali', feed.length, 1);
+    eq('realtime berulang: tersimpan sekali',
+      db.get().prepare("SELECT COUNT(*) AS n FROM attendance_logs WHERE ts = '2026-09-21 14:52:23'").get().n, 1);
+    await mgr.shutdown();
+    await mesin.close();
+    db.get().prepare('DELETE FROM attendance_logs WHERE device_id = ?').run(devRt);
+    devices.remove(devRt);
+  }
+
+  // ================================ 8d3. PIN otomatis & bentrok PIN di mesin
+  {
+    const { MockDevice } = require('./mock-device');
+    const { DeviceManager } = require('../src/main/zk/manager');
+    const { samePerson } = require('../src/main/services/devices');
+
+    check('nama: sama persis dianggap orang yang sama', samePerson('Adi Mulya', 'adi  mulya'));
+    check('nama: terpotong di mesin dianggap sama', samePerson('Adi Mulya Suprayogi Panjang', 'Adi Mulya'));
+    check('nama: nama cadangan mesin "User 25" bukan orang lain', samePerson('Siti', 'User 25'));
+    check('nama: nama berbeda terdeteksi', !samePerson('Siti Aminah', 'Budi Santoso'));
+
+    const mesin = new MockDevice({
+      users: [
+        { uid: 1, userId: '9077', name: 'Budi Asli', privilege: 0 },
+        { uid: 2, userId: '9079', name: 'Adi Mulya', privilege: 0 },
+      ],
+      attendance: [],
+    });
+    const portMesin = await mesin.listen();
+    const devPin = devices.create({ name: 'Mesin PIN', ip: '127.0.0.1', port: portMesin });
+    const mgr = new DeviceManager();
+    await mgr.syncUsers(devPin);
+
+    eq('PIN otomatis: melewati PIN yang sudah dipakai di mesin', employees.nextPin(), '9080');
+    const konflik = employees.pinConflicts('9077');
+    check('bentrok PIN: user mesin yang belum diimport terdeteksi',
+      konflik.length === 1 && konflik[0].name === 'Budi Asli' && konflik[0].device_name === 'Mesin PIN');
+    eq('bentrok PIN: PIN kosong tidak bentrok', employees.pinConflicts('9080').length, 0);
+
+    const siti = employees.create({ pin: '9077', name: 'Siti Baru' });
+    const adi = employees.create({ pin: '9079', name: 'Adi Mulya Suprayogi' });
+    const lain = employees.create({ pin: '9078', name: 'Karyawan Lain' });
+    eq('bentrok PIN: PIN milik sendiri yang tidak berubah tidak dicek', employees.pinConflicts('9077', siti).length, 0);
+
+    const coba = await mgr.pushEmployees(devPin, [siti, adi, lain]);
+    check('kirim ke mesin: berhenti minta konfirmasi', coba.needsConfirm === true);
+    check('kirim ke mesin: hanya orang yang berbeda yang dilaporkan',
+      coba.conflicts.length === 1 && coba.conflicts[0].pin === '9077' && coba.conflicts[0].deviceName === 'Budi Asli');
+    eq('kirim ke mesin: data orang di mesin belum tersentuh', mesin.users.find((u) => u.userId === '9077').name, 'Budi Asli');
+    eq('kirim ke mesin: karyawan lain juga belum dikirim', mesin.users.some((u) => u.userId === '9078'), false);
+
+    const lewati = await mgr.pushEmployees(devPin, [siti, adi, lain], { skipPins: ['9077'] });
+    check('kirim tanpa yang bentrok: berhasil', lewati.ok, lewati.error || '');
+    eq('kirim tanpa yang bentrok: dua terkirim', lewati.sent.length, 2);
+    eq('kirim tanpa yang bentrok: Budi tetap utuh', mesin.users.find((u) => u.userId === '9077').name, 'Budi Asli');
+
+    const timpa = await mgr.pushEmployees(devPin, [siti], { overwrite: true });
+    check('tetap timpa: berhasil', timpa.ok, timpa.error || '');
+    eq('tetap timpa: data di mesin diganti', mesin.users.find((u) => u.userId === '9077').name, 'Siti Baru');
+
+    await mgr.shutdown();
+    await mesin.close();
+    [siti, adi, lain].forEach((id) => employees.remove(id));
+    devices.remove(devPin);
+  }
+
+  // ================================================ 8e. login & hak akses
+  {
+    const { auth, authorize, verifySecret } = require('../src/main/services/auth');
+    const { audit } = require('../src/main/services/audit');
+    const gagal = (fn) => {
+      try {
+        fn();
+        return null;
+      } catch (err) {
+        return err.message;
+      }
+    };
+
+    check('login: aplikasi baru wajib membuat Admin', auth.needsSetup());
+    check('login: password terlalu pendek ditolak',
+      /minimal 8/.test(gagal(() => auth.setup({ username: 'admin', fullName: 'Admin', password: 'pendek' })) || ''));
+    const awal = auth.setup({ username: 'admin', fullName: 'Admin HRD', password: 'rahasia-123' });
+    eq('login: Admin pertama berperan admin', awal.user.role, 'admin');
+    check('login: kode pemulihan diberikan', /^[A-Z0-9]{4}(-[A-Z0-9]{4}){3}$/.test(awal.recoveryCode), awal.recoveryCode);
+    check('login: pembuatan Admin tidak bisa diulang',
+      /sudah pernah/.test(gagal(() => auth.setup({ username: 'admin2', fullName: 'X', password: 'rahasia-123' })) || ''));
+
+    const tersimpan = db.get().prepare("SELECT password_hash FROM app_users WHERE username = 'admin'").get().password_hash;
+    check('login: password tidak disimpan sebagai teks asli', !tersimpan.includes('rahasia-123') && tersimpan.startsWith('scrypt$'));
+    check('login: hash cocok dengan password benar', verifySecret('rahasia-123', tersimpan));
+    check('login: hash menolak password salah', !verifySecret('rahasia-124', tersimpan));
+
+    eq('login: berhasil dengan password benar', auth.login({ username: 'ADMIN', password: 'rahasia-123' }).username, 'admin');
+    check('login: password salah ditolak dengan pesan umum',
+      /salah/.test(gagal(() => auth.login({ username: 'admin', password: 'keliru-sekali' })) || ''));
+    for (let i = 0; i < 4; i++) gagal(() => auth.login({ username: 'admin', password: 'keliru-sekali' }));
+    check('login: dikunci sementara setelah 5 kali salah',
+      /Terlalu banyak/.test(gagal(() => auth.login({ username: 'admin', password: 'rahasia-123' })) || ''));
+
+    // Operator dibuat Admin dengan password sementara.
+    const op = auth.create({ username: 'operator1', fullName: 'Operator Satu', role: 'operator', password: 'sementara-1' });
+    eq('pengguna: operator wajib ganti password', op.must_change_password, 1);
+    const opMasuk = auth.login({ username: 'operator1', password: 'sementara-1' });
+    eq('hak akses: wajib ganti password memblokir perintah lain',
+      (authorize('reports.monthly', opMasuk) || {}).code, 'PASSWORD_CHANGE_REQUIRED');
+    const opBaru = auth.changePassword(op.id, { oldPassword: 'sementara-1', newPassword: 'milikku-sendiri' });
+    eq('pengguna: setelah ganti password bebas bekerja', authorize('reports.monthly', opBaru), null);
+    eq('hak akses: operator boleh scan manual', authorize('attendance.addManual', opBaru), null);
+    eq('hak akses: operator tidak boleh hapus user di mesin', (authorize('device.removeUsers', opBaru) || {}).code, 'FORBIDDEN');
+    eq('hak akses: operator tidak boleh pulihkan backup', (authorize('backup.restore', opBaru) || {}).code, 'FORBIDDEN');
+    eq('hak akses: operator tidak boleh kelola pengguna', (authorize('users.create', opBaru) || {}).code, 'FORBIDDEN');
+    eq('hak akses: admin boleh pulihkan backup', authorize('backup.restore', awal.user), null);
+    eq('hak akses: belum masuk ditolak', (authorize('employees.list', null) || {}).code, 'AUTH_REQUIRED');
+    eq('hak akses: layar login tetap terbuka tanpa masuk', authorize('auth.login', null), null);
+
+    check('pengguna: Admin terakhir tidak bisa dinonaktifkan akun lain',
+      /minimal satu Admin/.test(gagal(() => auth.update(op.id, awal.user.id, { fullName: 'Admin HRD', role: 'admin', active: 0 })) || ''));
+    check('pengguna: tidak bisa menurunkan peran sendiri',
+      /akun sendiri/.test(gagal(() => auth.update(awal.user.id, awal.user.id, { fullName: 'Admin HRD', role: 'operator', active: 1 })) || ''));
+    auth.update(awal.user.id, op.id, { fullName: 'Operator Satu', role: 'operator', active: 0 });
+    eq('pengguna: akun nonaktif kehilangan sesi', auth.current(op.id), null);
+    check('pengguna: akun nonaktif tidak bisa masuk',
+      /dinonaktifkan/.test(gagal(() => auth.login({ username: 'operator1', password: 'milikku-sendiri' })) || ''));
+
+    // Kode pemulihan: berlaku sekali, lalu diganti yang baru.
+    const pulih = auth.recover({ username: 'admin', code: awal.recoveryCode.toLowerCase(), newPassword: 'password-baru-1' });
+    eq('pemulihan: berhasil dengan kode yang benar', pulih.user.username, 'admin');
+    check('pemulihan: kode baru diterbitkan', pulih.recoveryCode !== awal.recoveryCode);
+    check('pemulihan: kode lama hangus',
+      /salah/.test(gagal(() => auth.recover({ username: 'admin', code: awal.recoveryCode, newPassword: 'password-baru-2' })) || ''));
+
+    audit.log(awal.user, 'Tes aktivitas', 'detail uji');
+    eq('catatan aktivitas: tersimpan dan bisa dicari', audit.list({ search: 'Tes aktivitas' }).rows[0].username, 'admin');
+    for (let i = 0; i < 30; i++) audit.log(awal.user, 'Tes halaman', `baris ${i}`);
+    const hal2 = audit.list({ search: 'Tes halaman', limit: 10, offset: 10 });
+    eq('catatan aktivitas: jumlah seluruh hasil', hal2.total, 30);
+    eq('catatan aktivitas: satu halaman sesuai limit', hal2.rows.length, 10);
+    eq('catatan aktivitas: halaman 2 berisi baris ke-11 dari terbaru', hal2.rows[0].detail, 'baris 19');
+    eq('catatan aktivitas: pilihan "Semua" tanpa batas', audit.list({ search: 'Tes halaman', limit: null }).rows.length, 30);
+    audit.savePending([{ at: '2026-09-21 10:00:00', username: 'admin', action: 'Pulihkan backup', detail: 'uji.db' }]);
+    eq('catatan aktivitas: titipan pemulihan ditulis saat dibuka', audit.flushPending(), 1);
+    eq('catatan aktivitas: titipan masuk ke database', audit.list({ search: 'uji.db' }).total, 1);
   }
 
   // ==================================================== 9. backup & pemulihan

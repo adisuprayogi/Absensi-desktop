@@ -548,7 +548,8 @@ class ZKClient extends EventEmitter {
       r.writeUInt8(privilege & 0xff, 2);
       write(password, 3, 8);
       write(name, 11, 24);
-      r.writeInt32LE(Number(card) || 0, 35);
+      // Nomor kartu tidak bertanda: kartu 10 digit sering melewati 2^31.
+      r.writeUInt32LE(Number(card) || 0, 35);
       write(groupId, 40, 7);
       write(userId, 48, 24);
     } else {
@@ -865,9 +866,24 @@ class ZKClient extends EventEmitter {
     await this._send(CMD.REG_EVENT, payload, 3000).catch(() => null);
   }
 
+  /**
+   * ACK untuk event realtime. Reply id-nya tetap USHRT_MAX - 1, persis pyzk,
+   * dan TIDAK memakai/menaikkan penghitung perintah biasa. Dengan reply id
+   * lain, mesin menganggap event belum diterima lalu mengirimnya berulang-ulang
+   * — di aplikasi, satu scan tampil terus-menerus di feed Dashboard.
+   */
+  _ackLiveEvent() {
+    const { packet } = createPacket(CMD.ACK_OK, null, this.sessionId, USHRT_MAX - 1);
+    try {
+      this._write(this.tcp ? wrapTcp(packet) : packet);
+    } catch {
+      /* socket sudah tertutup — abaikan */
+    }
+  }
+
   _handleLiveFrame(frame) {
     // Mesin menunggu ACK sebelum mengirim event berikutnya.
-    this._sendNoWait(CMD.ACK_OK);
+    this._ackLiveEvent();
     if (!frame.data || frame.data.length < 8) return;
 
     for (const rec of ZKClient.parseLiveRecords(frame.data)) {

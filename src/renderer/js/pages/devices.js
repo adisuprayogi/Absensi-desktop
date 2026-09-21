@@ -150,32 +150,104 @@
 
   async function showDeviceUsers(deviceId, deviceName) {
     const users = await A.call('devices.users', { deviceId });
+
+    // Pindah halaman cukup menggambar ulang isi dialog, bukan seluruh halaman.
+    const kunci = `device-users-${deviceId}`;
+    const gambar = () => {
+      const box = A.$('#deviceUsersBody');
+      if (box) box.innerHTML = isiTabel();
+    };
+    const isiTabel = () => {
+      const hal = A.paginate(kunci, users, { onChange: gambar });
+      return tabelUser(hal.rows) + hal.controls;
+    };
+    const tabelUser = (rows) =>
+      A.table(
+        [
+          { label: 'PIN', className: 'c num', render: (u) => `<strong>${A.esc(u.user_pin)}</strong>` },
+          { label: 'Nama di Mesin', render: (u) => A.esc(u.name || '-') },
+          {
+            label: 'Hak Akses', className: 'c',
+            render: (u) => (u.privilege >= 14 ? '<span class="badge" style="background:#8b5cf6">Admin</span>' : '<span class="badge soft">User</span>'),
+          },
+          {
+            label: 'Terhubung ke Karyawan',
+            render: (u) =>
+              u.employee_name
+                ? `<span style="color:#059669">✓ ${A.esc(u.employee_name)}</span>`
+                : '<span style="color:#b45309">Belum terdaftar</span>',
+          },
+        ],
+        rows
+      );
+
     await A.modal({
-      title: `User Terdaftar di ${deviceName}`,
+      title: `User Terdaftar di ${deviceName} (${users.length})`,
       wide: true,
       body: users.length
-        ? A.table(
-            [
-              { label: 'PIN', className: 'c num', render: (u) => `<strong>${A.esc(u.user_pin)}</strong>` },
-              { label: 'Nama di Mesin', render: (u) => A.esc(u.name || '-') },
-              {
-                label: 'Hak Akses', className: 'c',
-                render: (u) => (u.privilege >= 14 ? '<span class="badge" style="background:#8b5cf6">Admin</span>' : '<span class="badge soft">User</span>'),
-              },
-              {
-                label: 'Terhubung ke Karyawan',
-                render: (u) =>
-                  u.employee_name
-                    ? `<span style="color:#059669">✓ ${A.esc(u.employee_name)}</span>`
-                    : '<span style="color:#b45309">Belum terdaftar</span>',
-              },
-            ],
-            users
-          )
+        ? `<div id="deviceUsersBody">${isiTabel()}</div>`
         : A.emptyState('Belum ada data user', 'Tekan "Sinkron User" untuk mengambil daftar dari mesin.', '☺'),
       footer: '<button data-close>Tutup</button>',
     });
   }
+
+  /**
+   * Tarik log dari mesin, hanya menyimpan scan pada periode tertentu.
+   * Dipakai juga oleh halaman Log Scan, dengan periode dari filternya.
+   */
+  async function pullPeriodDialog({ from = null, to = null } = {}) {
+    const devices = (await A.call('devices.list')).filter((d) => d.active);
+    if (!devices.length) {
+      A.toast('Belum ada mesin absensi aktif', 'warn');
+      return false;
+    }
+    const values = await A.formDialog({
+      title: 'Tarik Data per Periode',
+      okLabel: 'Tarik Data',
+      fields: [
+        {
+          name: 'deviceId',
+          label: 'Mesin',
+          type: 'select',
+          value: '',
+          options: [
+            { value: '', label: `Semua mesin aktif (${devices.length})` },
+            ...devices.map((d) => ({ value: d.id, label: `${d.name} (${d.ip})` })),
+          ],
+        },
+        { name: 'from', label: 'Dari tanggal', type: 'date', value: from || `${A.fmt.currentMonth()}-01`, required: true, row: 'periode' },
+        { name: 'to', label: 'Sampai tanggal', type: 'date', value: to || A.fmt.today(), required: true, row: 'periode' },
+      ],
+      validate: (v) => (v.from > v.to ? 'Tanggal awal tidak boleh setelah tanggal akhir' : null),
+    });
+    if (!values) return false;
+
+    const periode = { from: values.from, to: values.to };
+    const label = `${A.fmt.date(periode.from)} s/d ${A.fmt.date(periode.to)}`;
+    A.toast(`Menarik data periode ${label}... seluruh log di mesin tetap dibaca, mohon tunggu.`, 'ok', 6000);
+
+    const results = values.deviceId
+      ? [{ name: devices.find((d) => String(d.id) === String(values.deviceId)).name,
+           ...(await A.callSafe('device.pull', { id: Number(values.deviceId), ...periode }, { ok: false })) }]
+      : await A.callSafe('device.pullAll', periode, []);
+
+    const ok = (results || []).filter((r) => r.ok);
+    const gagal = (results || []).filter((r) => !r.ok);
+    const baru = ok.reduce((n, r) => n + (r.inserted || 0), 0);
+    const dalam = ok.reduce((n, r) => n + (r.fetched || 0), 0);
+    const luar = ok.reduce((n, r) => n + (r.outOfRange || 0), 0);
+    if (ok.length) {
+      A.toast(
+        `Periode ${label}: ${baru} data baru dari ${dalam} scan dalam periode` +
+          (luar ? ` • ${luar} scan di luar periode tidak disimpan` : ''),
+        'ok',
+        8000
+      );
+    }
+    for (const r of gagal) A.toast(`${r.name || 'Mesin'}: ${r.error || 'gagal'}`, 'err', 8000);
+    return true;
+  }
+  A.pullPeriodDialog = pullPeriodDialog;
 
   A.registerPage('devices', {
     title: 'Mesin Absensi',
@@ -189,10 +261,14 @@
       const liveStatus = await A.callSafe('device.liveStatus', {}, {});
 
       A.setActions(
-        `<button id="btnPullAll">Tarik Data Semua</button>
+        `<button id="btnPullPeriod">Tarik per Periode</button>
+         <button id="btnPullAll">Tarik Data Semua</button>
          <button class="btn-primary" id="btnAdd">+ Tambah Mesin</button>`,
         {
           '#btnAdd': () => deviceForm(null),
+          '#btnPullPeriod': async () => {
+            if (await pullPeriodDialog()) await A.refresh();
+          },
           '#btnPullAll': async (e) => {
             await A.busy(e.currentTarget, async () => {
               const results = await A.callSafe('device.pullAll', {}, []);

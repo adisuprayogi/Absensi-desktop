@@ -1,15 +1,16 @@
-/* Titik masuk aplikasi: pasang navigasi, indikator realtime, dan halaman awal. */
+/* Titik masuk aplikasi: minta masuk, lalu pasang navigasi, indikator realtime, dan halaman awal. */
 'use strict';
 
 (async function bootstrap() {
-  const { $, $$, call, callSafe, toast, go, refresh } = window.App;
+  const { $, $$, callSafe, toast, go, refresh, formDialog } = window.App;
+  const Auth = window.Auth;
 
   // ---- navigasi sidebar
   $$('.nav-item').forEach((btn) => {
     btn.addEventListener('click', () => go(btn.dataset.page));
   });
 
-  // ---- identitas aplikasi
+  // ---- identitas aplikasi (boleh dibaca sebelum masuk)
   const info = await callSafe('app.info', {}, {});
   if (info && info.version) {
     $('#appVersion').textContent = `Versi ${info.version}`;
@@ -18,11 +19,40 @@
     $('#appCopyright').textContent = info.copyright;
     $('#appCopyright').title = info.copyright;
   }
-  const settings = await callSafe('settings.all', {}, {});
-  if (settings && settings.company_name) {
-    $('#brandCompany').textContent = settings.company_name;
-    $('#brandCompany').title = settings.company_name;
+
+  // ---- pengguna yang sedang masuk
+  async function afterLogin(user) {
+    window.App.setUser(user);
+    $('#userName').textContent = user.full_name;
+    $('#userRole').textContent = `${user.username} · ${user.role_label}`;
+
+    const settings = await callSafe('settings.all', {}, {});
+    if (settings && settings.company_name) {
+      $('#brandCompany').textContent = settings.company_name;
+      $('#brandCompany').title = settings.company_name;
+    }
+    Auth.setIdleMinutes(settings ? settings.auto_lock_minutes : 15);
+    await refreshLiveStatus();
+    await go('dashboard');
   }
+  Auth.setOnUnlock(afterLogin);
+
+  $('#btnLogout').addEventListener('click', () => Auth.lock());
+  $('#btnChangePassword').addEventListener('click', async () => {
+    const v = await formDialog({
+      title: 'Ganti Password',
+      okLabel: 'Simpan',
+      fields: [
+        { name: 'oldPassword', label: 'Password Lama', type: 'password', required: true },
+        { name: 'newPassword', label: 'Password Baru (minimal 8 karakter)', type: 'password', required: true },
+        { name: 'confirm', label: 'Ulangi Password Baru', type: 'password', required: true },
+      ],
+      validate: (x) => (x.newPassword !== x.confirm ? 'Konfirmasi password tidak sama' : null),
+    });
+    if (!v) return;
+    const user = await callSafe('auth.changePassword', { oldPassword: v.oldPassword, newPassword: v.newPassword });
+    if (user) toast('Password berhasil diganti', 'ok');
+  });
 
   // ---- indikator koneksi realtime
   const liveWrap = $('#liveIndicator');
@@ -41,16 +71,17 @@
     Object.entries(status || {}).forEach(([id, on]) => liveDevices.set(String(id), on));
     paintLive();
   }
-  await refreshLiveStatus();
 
   // ---- kejadian dari mesin absensi
+  // Selama terkunci, tidak ada data yang boleh tampil (termasuk lewat notifikasi).
   window.api.on('live-status', (p) => {
     liveDevices.set(String(p.deviceId), !!p.active);
     paintLive();
-    if (window.App.page === 'devices') refresh();
+    if (!Auth.locked && window.App.page === 'devices') refresh();
   });
 
   window.api.on('live-scan', (p) => {
+    if (Auth.locked) return;
     // Dashboard menampilkan feed-nya sendiri; halaman lain cukup diberi notifikasi.
     if (window.App.page === 'dashboard' && window.Dashboard && window.Dashboard.onLiveScan) {
       window.Dashboard.onLiveScan(p);
@@ -63,19 +94,24 @@
   });
 
   window.api.on('sync-done', (p) => {
+    if (Auth.locked) return;
     if (p.inserted > 0) toast(`${p.name}: ${p.inserted} data absensi baru`, 'ok');
     if (['dashboard', 'logs', 'reports', 'devices'].includes(window.App.page)) refresh();
   });
 
   window.api.on('sync-error', (p) => {
+    if (Auth.locked) return;
     toast(`${p.name}: ${p.error}`, 'err');
   });
 
   // ---- kemajuan pekerjaan ke mesin absensi
-  window.api.on('progress', (p) => window.App.showProgress(p));
+  window.api.on('progress', (p) => {
+    if (!Auth.locked) window.App.showProgress(p);
+  });
 
   // ---- menu Berkas
   window.api.on('menu', async (action) => {
+    if (Auth.locked) return;
     if (action === 'backup') {
       const res = await callSafe('backup.now');
       if (res && res.ok) toast(`Backup dibuat: ${res.fileName} (${res.sizeText})`, 'ok', 5000);
@@ -88,5 +124,5 @@
     }
   });
 
-  await go('dashboard');
+  await afterLogin(await Auth.ensure());
 })();

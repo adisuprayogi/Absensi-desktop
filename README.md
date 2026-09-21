@@ -77,6 +77,37 @@ Aplikasi tidak memerlukan hak administrator dan terpasang untuk pengguna saat in
 
 ---
 
+## Pengguna & Login
+
+Saat pertama kali dibuka, aplikasi meminta pembuatan **akun Admin**. Setelah
+itu, aplikasi selalu meminta login.
+
+**Kode pemulihan.** Saat akun Admin dibuat, aplikasi menampilkan kode seperti
+`XB7V-WC2A-EMZK-4SRY` **satu kali saja**. Catat atau cetak kode itu dan simpan
+di tempat aman. Bila password Admin lupa, pilih **Lupa password Admin?** di
+layar login. Kode yang sudah dipakai hangus, dan aplikasi memberi kode baru.
+
+| Peran | Boleh |
+|---|---|
+| **Admin** | Semua fitur, termasuk menu **Pengguna** |
+| **Operator** | Tarik data, karyawan, jadwal, izin & cuti, scan manual, rekap & export. **Tidak boleh**: menghapus data, mengubah mesin & pengaturan, menghapus user/log di mesin, memulihkan backup, mengelola pengguna |
+
+Kelola akun lewat **Pengguna** (khusus Admin):
+
+- **+ Tambah Pengguna** dengan password sementara. Pengguna wajib
+  menggantinya saat pertama kali masuk.
+- **Reset Password** bila pengguna lupa.
+- Nonaktifkan akun yang sudah tidak dipakai. Akun tidak dihapus, supaya
+  riwayat aktivitasnya tetap ada.
+- **Kunci otomatis**: bawaannya 15 menit tanpa aktivitas.
+- **Catatan Aktivitas**: mencatat siapa yang masuk/keluar, menambah scan
+  manual, menghapus data, mengubah mesin/pengaturan, atau memulihkan backup.
+
+> Login melindungi aplikasi, tetapi berkas database tidak terenkripsi. Kunci
+> juga akun Windows komputer tersebut dengan password.
+
+---
+
 ## Persiapan Awal
 
 ### 1. Siapkan mesin absensi
@@ -321,7 +352,7 @@ Keduanya baru bisa bekerja setelah koneksi berhasil.
 Database disimpan di:
 
 ```
-%APPDATA%Absensi Karyawandataabsensi.db
+%APPDATA%\Absensi Karyawan\data\absensi.db
 ```
 
 Semua pengelolaan backup ada di **Pengaturan → Backup & Pemulihan Data**.
@@ -382,6 +413,27 @@ npm run test:ui      # buka tiap halaman dan simpan tangkapan layar
 npm run dist         # bangun installer Windows ke folder dist/
 npm run icon         # buat ulang build/icon.ico
 ```
+
+### Membangun Installer Windows
+
+`npm run dist` sebaiknya dijalankan di Windows, karena better-sqlite3 adalah
+modul native yang harus dikompilasi untuk Windows.
+
+Tanpa komputer Windows, pakai GitHub Actions
+(`.github/workflows/build-windows.yml`):
+
+- Setiap push ke `main`: uji dijalankan, lalu installer dibangun. Unduh dari
+  tab **Actions → run terakhir → Artifacts → Absensi-Karyawan-Setup**.
+- Push tag versi untuk rilis — installer otomatis dilampirkan ke halaman
+  **Releases**:
+
+  ```bash
+  git tag v1.0.1
+  git push origin v1.0.1
+  ```
+
+  Samakan dulu `version` di `package.json` dengan tag-nya, karena nama berkas
+  installer diambil dari situ.
 
 ### Struktur
 

@@ -186,6 +186,47 @@ const employees = {
   },
 
   /**
+   * PIN kosong berikutnya: angka terbesar yang sudah dipakai, baik di aplikasi
+   * maupun di mesin mana pun yang pernah dibaca, ditambah satu. Supaya PIN
+   * usulan tidak pernah jatuh ke user mesin yang belum diimport.
+   */
+  nextPin() {
+    const rows = db.get()
+      .prepare('SELECT pin AS p FROM employees UNION SELECT user_pin FROM device_users')
+      .all();
+    let max = 0;
+    for (const r of rows) {
+      const pin = String(r.p || '').trim();
+      if (/^\d{1,9}$/.test(pin)) max = Math.max(max, Number(pin));
+    }
+    return String(max + 1);
+  },
+
+  /**
+   * User mesin yang sudah memakai PIN ini tetapi belum menjadi karyawan di
+   * aplikasi. Mengirim karyawan dengan PIN itu ke mesin akan menimpa data
+   * orang tersebut, termasuk membuat sidik jarinya menjadi milik karyawan ini.
+   * Hanya diperiksa bila PIN baru atau berubah.
+   */
+  pinConflicts(pin, employeeId = null) {
+    const p = String(pin || '').trim();
+    if (!p) return [];
+    if (employeeId) {
+      const lama = db.get().prepare('SELECT pin FROM employees WHERE id = ?').get(employeeId);
+      if (lama && String(lama.pin) === p) return [];
+    }
+    return db.get()
+      .prepare(`
+        SELECT du.device_id, dv.name AS device_name, du.user_pin, du.name, du.card,
+               du.privilege, du.password, du.finger_count, du.synced_at
+        FROM device_users du JOIN devices dv ON dv.id = du.device_id
+        WHERE du.user_pin = ?
+        ORDER BY dv.name
+      `)
+      .all(p);
+  },
+
+  /**
    * Buat karyawan dari daftar user mesin yang belum terdaftar.
    * @param {Array<{user_pin:string,name:string}>} rows
    */
@@ -223,12 +264,19 @@ const employees = {
   },
 };
 
+/** Batas nomor kartu RFID: mesin menyimpannya sebagai 32 bit tak bertanda. */
+const MAX_CARD = 0xffffffff;
+
 function normalizeEmployee(d) {
+  const card = Number(d.card) || 0;
+  if (card < 0 || card > MAX_CARD || !Number.isInteger(card)) {
+    throw new Error(`Nomor kartu RFID tidak valid (harus angka 0 sampai ${MAX_CARD}).`);
+  }
   return {
     pin: String(d.pin || '').trim(),
     nip: d.nip ? String(d.nip).trim() : null,
     name: String(d.name || '').trim(),
-    card: Number(d.card) || 0,
+    card,
     privilege: Number(d.privilege) || 0,
     device_password: d.device_password ? String(d.device_password).trim() : null,
     department_id: d.department_id || null,

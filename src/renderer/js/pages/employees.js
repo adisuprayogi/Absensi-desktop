@@ -3,12 +3,56 @@
 (function () {
   const A = window.App;
   const state = { search: '', departmentId: '', activeOnly: false };
+  // Karyawan terpilih untuk tindakan massal; bertahan saat pindah halaman tabel.
+  const pilihan = new Set();
 
-  async function employeeForm(existing) {
-    const [depts, shifts] = await Promise.all([
+  /**
+   * PIN yang diketik sudah dipakai orang lain di mesin. Admin memilih:
+   * kembali ke form, pakai PIN kosong lain, import orang itu dari mesin, atau
+   * tetap memakai PIN ini (bila memang orang yang sama).
+   */
+  async function pinConflictDialog(values, konflik, nextPin, baru) {
+    const daftar = konflik
+      .map((k) => `<li><strong>${A.esc(k.device_name)}</strong>: "${A.esc(k.name || '(tanpa nama)')}"` +
+        (k.finger_count ? ` — <strong>${k.finger_count} sidik jari</strong>` : ' — belum ada sidik jari') +
+        (Number(k.card) ? `, kartu ${A.esc(k.card)}` : '') + '</li>')
+      .join('');
+    return A.modal({
+      title: `PIN ${values.pin} Sudah Dipakai di Mesin`,
+      wide: true,
+      body: `
+        <p style="margin-top:0">PIN <strong>${A.esc(values.pin)}</strong> sudah dipakai user yang belum terdaftar di aplikasi:</p>
+        <ul style="margin:0 0 12px;padding-left:20px;line-height:1.7">${daftar}</ul>
+        <div class="warn-bar" style="margin:0 0 12px">
+          Bila ${A.esc(values.name)} disimpan dengan PIN ini lalu dikirim ke mesin, data orang tersebut di mesin
+          <b>tertimpa</b>, dan sidik jarinya ikut menjadi milik ${A.esc(values.name)} —
+          setiap orang itu scan, tercatat sebagai ${A.esc(values.name)}.
+        </div>
+        <p class="small muted" style="margin:0">Scan dengan PIN ini yang sudah tertarik juga akan tercatat atas nama ${A.esc(values.name)}.</p>`,
+      footer: `
+        <button data-choice="back">Kembali ke Form</button>
+        ${baru ? '<button data-choice="import">Import Orang Itu dari Mesin</button>' : ''}
+        <button class="btn-primary" data-choice="other">Pakai PIN Kosong (${A.esc(nextPin)})</button>
+        <button class="btn-danger" data-choice="keep">Tetap Pakai PIN Ini</button>`,
+      onOpen: (box) => {
+        A.$$('[data-choice]', box).forEach((b) =>
+          b.addEventListener('click', () => A.closeModal(b.dataset.choice))
+        );
+      },
+    });
+  }
+
+  /**
+   * @param existing karyawan yang diubah, atau null untuk karyawan baru
+   * @param draft    isian sebelumnya, saat form dibuka ulang dari dialog bentrok PIN
+   */
+  async function employeeForm(existing, draft = null) {
+    const [depts, shifts, nextPin] = await Promise.all([
       A.call('departments.list'),
       A.call('shifts.list', { activeOnly: true }),
+      existing || draft ? null : A.call('employees.nextPin'),
     ]);
+    const awal = draft || existing || {};
 
     const values = await A.formDialog({
       title: existing ? `Ubah Karyawan — ${existing.name}` : 'Tambah Karyawan',
@@ -17,36 +61,38 @@
       fields: [
         {
           name: 'pin', label: 'PIN / User ID Mesin', required: true, row: 'a',
-          value: existing ? existing.pin : '',
-          hint: 'Harus sama persis dengan User ID di mesin absensi',
+          value: draft ? draft.pin : existing ? existing.pin : nextPin,
+          hint: existing
+            ? 'Harus sama persis dengan User ID di mesin absensi'
+            : 'Terisi otomatis dengan nomor yang belum dipakai di aplikasi maupun di mesin. Boleh diganti.',
         },
-        { name: 'nip', label: 'NIP / Nomor Pegawai', row: 'a', value: existing ? existing.nip : '' },
-        { name: 'name', label: 'Nama Lengkap', required: true, value: existing ? existing.name : '' },
+        { name: 'nip', label: 'NIP / Nomor Pegawai', row: 'a', value: awal.nip || '' },
+        { name: 'name', label: 'Nama Lengkap', required: true, value: awal.name || '' },
         {
           name: 'department_id', label: 'Departemen', type: 'select', row: 'b',
-          value: existing ? existing.department_id : '',
+          value: awal.department_id || '',
           options: [{ value: '', label: '— Tidak ada —' }, ...depts.map((d) => ({ value: d.id, label: d.name }))],
         },
-        { name: 'position', label: 'Jabatan', row: 'b', value: existing ? existing.position : '' },
+        { name: 'position', label: 'Jabatan', row: 'b', value: awal.position || '' },
         {
           name: 'default_shift_id', label: 'Shift Bawaan', type: 'select', row: 'c',
-          value: existing ? existing.default_shift_id : '',
+          value: awal.default_shift_id || '',
           options: [
             { value: '', label: '— Ikuti jadwal mingguan —' },
             ...shifts.map((s) => ({ value: s.id, label: `${s.code} — ${s.name} (${s.start_time}-${s.end_time})` })),
           ],
           hint: 'Shift yang dipakai pada hari kerja. Hari yang ditandai libur di jadwal mingguan tetap libur.',
         },
-        { name: 'join_date', label: 'Tanggal Masuk', type: 'date', row: 'c', value: existing ? existing.join_date : '' },
+        { name: 'join_date', label: 'Tanggal Masuk', type: 'date', row: 'c', value: awal.join_date || '' },
         {
           name: 'card', label: 'Nomor Kartu RFID', type: 'number', row: 'e',
-          value: existing ? existing.card || '' : '',
+          value: awal.card || '',
           attrs: 'min="0" step="1"',
           hint: 'Kosongkan bila tidak memakai kartu. Ikut terkirim saat sinkron ke mesin.',
         },
         {
           name: 'privilege', label: 'Hak Akses di Mesin', type: 'select', row: 'e',
-          value: existing ? existing.privilege || 0 : 0,
+          value: awal.privilege || 0,
           options: [
             { value: 0, label: 'Pengguna biasa' },
             { value: 2, label: 'Pendaftar (boleh mendaftarkan sidik jari)' },
@@ -56,22 +102,66 @@
         },
         {
           name: 'device_password', label: 'Password Mesin', row: 'f',
-          value: existing ? existing.device_password || '' : '',
+          value: awal.device_password || '',
           attrs: 'maxlength="8" inputmode="numeric"',
           hint: 'Angka, untuk absen tanpa sidik jari. Kosongkan bila tidak dipakai.',
         },
-        { name: 'phone', label: 'No. HP', row: 'f', value: existing ? existing.phone : '' },
-        { name: 'email', label: 'Email', type: 'email', row: 'f', value: existing ? existing.email : '' },
-        { name: 'note', label: 'Catatan', type: 'textarea', value: existing ? existing.note : '' },
-        { name: 'active', label: 'Karyawan aktif', type: 'checkbox', value: existing ? existing.active : 1 },
+        { name: 'phone', label: 'No. HP', row: 'f', value: awal.phone || '' },
+        { name: 'email', label: 'Email', type: 'email', row: 'f', value: awal.email || '' },
+        { name: 'note', label: 'Catatan', type: 'textarea', value: awal.note || '' },
+        { name: 'active', label: 'Karyawan aktif', type: 'checkbox', value: awal.active !== undefined ? awal.active : 1 },
       ],
       validate: (v) => (!String(v.pin || '').trim() ? 'PIN wajib diisi' : null),
     });
     if (!values) return;
+    values.pin = String(values.pin).trim();
 
-    if (existing) await A.call('employees.update', { id: existing.id, ...values });
-    else await A.call('employees.create', values);
+    // PIN yang sudah dipakai orang lain di mesin: jangan diam-diam disimpan.
+    const konflik = await A.callSafe('employees.pinConflicts', { pin: values.pin, id: existing ? existing.id : null }, []);
+    if (konflik && konflik.length) {
+      const kosong = await A.call('employees.nextPin');
+      const pilihan = await pinConflictDialog(values, konflik, kosong, !existing);
+      if (pilihan === 'other') return employeeForm(existing, { ...values, pin: kosong });
+      if (pilihan === 'import') return importConflict(values, konflik);
+      if (pilihan !== 'keep') return employeeForm(existing, values);
+    }
+
+    try {
+      if (existing) await A.call('employees.update', { id: existing.id, ...values });
+      else await A.call('employees.create', values);
+    } catch (err) {
+      A.toast(err.message, 'err', 6000);
+      return employeeForm(existing, values);
+    }
     A.toast(existing ? 'Data karyawan diperbarui' : 'Karyawan ditambahkan', 'ok');
+    await A.refresh();
+  }
+
+  /**
+   * Orang di mesin itu ternyata memang yang dimaksud: buat karyawannya dengan
+   * nama, kartu, hak akses, dan password dari mesin, sementara departemen,
+   * jabatan, shift, dll. tetap dari isian form. Kondisinya langsung dicatat
+   * sepakat, supaya halaman Sinkron Karyawan menunjukkan "Sudah di mesin".
+   */
+  async function importConflict(values, konflik) {
+    const utama = konflik[0];
+    try {
+      await A.call('employees.create', {
+        ...values,
+        name: utama.name || values.name,
+        card: utama.card || 0,
+        privilege: utama.privilege || 0,
+        device_password: utama.password || values.device_password,
+      });
+      // Mesin pertama didahulukan: dicatat terakhir supaya datanya yang dipakai.
+      for (const k of [...konflik].reverse()) {
+        await A.call('devices.adoptFromDevice', { deviceId: k.device_id, pins: [values.pin] });
+      }
+    } catch (err) {
+      A.toast(err.message, 'err', 6000);
+      return;
+    }
+    A.toast(`${utama.name || values.name} diimport dari ${utama.device_name} dengan PIN ${values.pin}`, 'ok', 6000);
     await A.refresh();
   }
 
@@ -238,6 +328,11 @@
       const aktif = list.filter((e) => e.active).length;
       A.setSubtitle(`${list.length} karyawan ditampilkan • ${aktif} aktif`);
 
+      A.prunePicks(pilihan, list.map((e) => e.id));
+      const hal = A.paginate('employees', list, {
+        resetOn: [state.search, state.departmentId, state.activeOnly],
+      });
+
       root.innerHTML = `
         <div class="toolbar">
           <input class="search" id="q" placeholder="Cari nama, PIN, atau NIP..." value="${A.esc(state.search)}" />
@@ -250,6 +345,7 @@
 
         <div class="bulk-bar" id="bulkBar" hidden>
           <span class="bulk-count"><strong id="bulkCount">0</strong> karyawan terpilih</span>
+          <span class="pick-note" id="pickNote"></span>
           <div class="spacer"></div>
           <button class="btn-sm" data-act="bulkOn">Aktifkan</button>
           <button class="btn-sm" data-act="bulkOff">Nonaktifkan</button>
@@ -264,7 +360,7 @@
                 {
                   labelHtml: '<input type="checkbox" class="pick-all" title="Pilih semua yang tampil">',
                   className: 'c',
-                  render: (e) => `<input type="checkbox" class="pick" value="${e.id}">`,
+                  render: (e) => `<input type="checkbox" class="pick" value="${e.id}"${pilihan.has(e.id) ? ' checked' : ''}>`,
                 },
                 { label: 'PIN', className: 'c num', render: (e) => `<strong>${A.esc(e.pin)}</strong>` },
                 {
@@ -315,10 +411,11 @@
                   </div>`,
                 },
               ],
-              list,
+              hal.rows,
               { empty: 'Belum ada karyawan. Tambah manual atau import dari mesin absensi.' }
             )}
           </div>
+          ${hal.controls}
         </div>
       `;
 
@@ -343,41 +440,70 @@
         if (!ids.length) return undefined;
         return A.busy(btn, async () => {
           const res = await A.callSafe('employees.setActiveMany', { ids, active: aktif });
-          if (res) A.toast(`${res.changed} karyawan di${aktif ? 'aktifkan' : 'nonaktifkan'}`, 'ok');
+          if (res) {
+            pilihan.clear();
+            A.toast(`${res.changed} karyawan di${aktif ? 'aktifkan' : 'nonaktifkan'}`, 'ok');
+          }
           await A.refresh();
         }, 'Menyimpan...');
       }
 
       // ---- pilihan banyak baris
+      // Kotak centang hanya ada untuk halaman yang tampil; pilihan sebenarnya
+      // disimpan di `pilihan`, jadi yang dicentang di halaman lain tidak hilang.
       const kotak = () => A.$$('.pick', root);
-      const terpilih = () => kotak().filter((c) => c.checked).map((c) => Number(c.value));
+      const terpilih = () => [...pilihan].map(Number);
 
       // Baris aksi diperbarui langsung tanpa membangun ulang halaman, supaya
       // centang yang sudah dipasang tidak ikut hilang.
       function segarkanBar() {
-        const n = terpilih().length;
+        const n = pilihan.size;
         A.$('#bulkCount', root).textContent = n;
         A.$('#bulkBar', root).hidden = n === 0;
+        const dicentang = kotak().filter((c) => c.checked).length;
         const semua = A.$('.pick-all', root);
         if (semua) {
           const total = kotak().length;
-          semua.checked = total > 0 && n === total;
-          semua.indeterminate = n > 0 && n < total;
+          semua.checked = total > 0 && dicentang === total;
+          semua.indeterminate = dicentang > 0 && dicentang < total;
         }
+        // Seluruh halaman ini tercentang, tetapi hasil filter lebih banyak.
+        const note = A.$('#pickNote', root);
+        note.innerHTML =
+          n < list.length && dicentang === kotak().length && dicentang > 0
+            ? `<button class="link" data-act="pickAll">Pilih semua ${list.length} hasil filter</button>`
+            : n > dicentang
+              ? `<span class="muted">(${n - dicentang} di halaman lain)</span>`
+              : '';
       }
 
-      kotak().forEach((c) => c.addEventListener('change', segarkanBar));
+      kotak().forEach((c) =>
+        c.addEventListener('change', () => {
+          if (c.checked) pilihan.add(Number(c.value));
+          else pilihan.delete(Number(c.value));
+          segarkanBar();
+        })
+      );
       const semuaBox = A.$('.pick-all', root);
       if (semuaBox) {
         semuaBox.addEventListener('change', () => {
-          kotak().forEach((c) => { c.checked = semuaBox.checked; });
+          kotak().forEach((c) => {
+            c.checked = semuaBox.checked;
+            if (c.checked) pilihan.add(Number(c.value));
+            else pilihan.delete(Number(c.value));
+          });
           segarkanBar();
         });
       }
       segarkanBar();
 
       A.bindActions(root, {
+        pickAll: () => {
+          list.forEach((e) => pilihan.add(e.id));
+          segarkanBar();
+        },
         bulkClear: () => {
+          pilihan.clear();
           kotak().forEach((c) => { c.checked = false; });
           segarkanBar();
         },
@@ -408,7 +534,10 @@
 
           return A.busy(btn, async () => {
             const res = await A.callSafe('employees.removeMany', { ids });
-            if (res) A.toast(`${res.removed} karyawan dihapus`, 'ok');
+            if (res) {
+              pilihan.clear();
+              A.toast(`${res.removed} karyawan dihapus`, 'ok');
+            }
             await A.refresh();
           }, 'Menghapus...');
         },

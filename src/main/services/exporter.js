@@ -68,17 +68,33 @@ function autoFit(sheet, minWidth = 8, maxWidth = 40) {
   });
 }
 
+/**
+ * Rekap ringkasan untuk ekspor: satu bulan (`month`) atau rentang tanggal
+ * bebas (`from`/`to`, mis. periode gaji 21 - 20).
+ */
+function summaryData(params) {
+  if (params.from && params.to) {
+    return {
+      data: reports.range(params),
+      judul: 'PERIODE',
+      periode: `${formatDateLong(params.from)} s/d ${formatDateLong(params.to)}`,
+    };
+  }
+  const data = reports.monthly(params);
+  return { data, judul: 'BULANAN', periode: monthLabel(data.month) };
+}
+
 // ------------------------------------------------------------------ Excel
 
-/** Rekap bulanan: sheet ringkasan + sheet detail harian. */
+/** Rekap bulanan atau per periode: sheet ringkasan + sheet detail harian. */
 async function monthlyExcel(filePath, params) {
-  const data = reports.monthly(params);
+  const { data, judul, periode } = summaryData(params);
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Aplikasi Absensi Karyawan';
   wb.created = new Date();
 
   // ---- Sheet 1: ringkasan per karyawan
-  const s1 = wb.addWorksheet('Rekap Bulanan', {
+  const s1 = wb.addWorksheet(judul === 'BULANAN' ? 'Rekap Bulanan' : 'Rekap Periode', {
     pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
   });
   const cols1 = [
@@ -86,7 +102,7 @@ async function monthlyExcel(filePath, params) {
     'Hadir', 'Terlambat', 'Tdk Lengkap', 'Alpha', 'Cuti', 'Sakit', 'Izin', 'Dinas Luar', 'Libur',
     'Total Telat', 'Total Plg Cepat', 'Total Jam Kerja', 'Total Lembur',
   ];
-  addTitle(s1, cols1.length, 'REKAP ABSENSI BULANAN', `Periode: ${monthLabel(data.month)}`);
+  addTitle(s1, cols1.length, `REKAP ABSENSI ${judul}`, `Periode: ${periode}`);
   styleHeaderRow(s1.addRow(cols1));
 
   data.summary.forEach((s, i) => {
@@ -112,7 +128,7 @@ async function monthlyExcel(filePath, params) {
     'Tanggal', 'Hari', 'PIN', 'Nama Karyawan', 'Departemen', 'Shift', 'Jam Kerja',
     'Masuk', 'Pulang', 'Status', 'Telat (menit)', 'Plg Cepat (menit)', 'Jam Kerja', 'Lembur',
   ];
-  addTitle(s2, cols2.length, 'DETAIL ABSENSI HARIAN', `Periode: ${monthLabel(data.month)}`);
+  addTitle(s2, cols2.length, 'DETAIL ABSENSI HARIAN', `Periode: ${periode}`);
   styleHeaderRow(s2.addRow(cols2));
 
   for (const r of data.rows) {
@@ -253,9 +269,9 @@ function statusClass(code) {
   return '';
 }
 
-/** HTML rekap bulanan (ringkasan per karyawan). */
+/** HTML rekap bulanan atau per periode (ringkasan per karyawan). */
 function monthlyPdfHtml(params) {
-  const data = reports.monthly(params);
+  const { data, judul, periode } = summaryData(params);
   const head = `<tr>
     <th>No</th><th>PIN</th><th>Nama Karyawan</th><th>Departemen</th>
     <th>Hadir</th><th>Telat</th><th>Alpha</th><th>Cuti</th><th>Sakit</th><th>Izin</th>
@@ -277,7 +293,11 @@ function monthlyPdfHtml(params) {
     )
     .join('');
   const table = `<table><thead>${head}</thead><tbody>${body || '<tr><td colspan="15" class="c muted">Tidak ada data</td></tr>'}</tbody></table>`;
-  return pdfShell('Rekap Absensi Bulanan', `Periode: ${monthLabel(data.month)}`, table);
+  return pdfShell(
+    judul === 'BULANAN' ? 'Rekap Absensi Bulanan' : 'Rekap Absensi Periode',
+    `Periode: ${periode}`,
+    table
+  );
 }
 
 /** HTML rekap harian. */
@@ -309,8 +329,10 @@ function dailyPdfHtml(params) {
 }
 
 /** HTML kartu absensi satu karyawan (detail per tanggal). */
-function employeeCardPdfHtml({ employeeId, month }) {
-  const { start, end } = monthBounds(month);
+function employeeCardPdfHtml({ employeeId, month = null, from = null, to = null }) {
+  const bebas = from && to;
+  const { start, end } = bebas ? { start: from, end: to } : monthBounds(month);
+  const periode = bebas ? `${formatDateLong(from)} s/d ${formatDateLong(to)}` : monthLabel(month);
   const { rows, summary } = reports.employeeCard({ employeeId, from: start, to: end });
   const emp = rows[0];
   const head = `<tr>
@@ -347,8 +369,8 @@ function employeeCardPdfHtml({ employeeId, month }) {
     : '';
 
   const subtitle = emp
-    ? `${emp.employee_name} (PIN ${emp.pin})${emp.department_name ? ` — ${emp.department_name}` : ''} • ${monthLabel(month)}`
-    : monthLabel(month);
+    ? `${emp.employee_name} (PIN ${emp.pin})${emp.department_name ? ` — ${emp.department_name}` : ''} • ${periode}`
+    : periode;
 
   return pdfShell(
     'Kartu Absensi Karyawan',

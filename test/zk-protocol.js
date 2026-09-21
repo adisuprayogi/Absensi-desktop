@@ -95,7 +95,10 @@ async function testProtocol(protocol) {
     device.pushScan({ userId: '103', timestamp: new Date(2026, 8, 7, 8, 2, 30) });
     await new Promise((r) => setTimeout(r, 250));
 
-    eq(`${label}: dua scan realtime diterima`, scans.length, 2);
+    eq(`${label}: dua scan realtime diterima (tanpa pengulangan)`, scans.length, 2);
+    eq(`${label}: mesin tidak perlu mengirim ulang event`, device.liveResends, 0);
+    check(`${label}: ACK event memakai reply id seperti pyzk`, device.acks.length >= 2 && device.acks.every((r) => r === 0),
+      `reply id: ${device.acks.join(',')}`);
     eq(`${label}: PIN scan realtime`, scans[0].userId, '102');
     eq(
       `${label}: waktu scan realtime`,

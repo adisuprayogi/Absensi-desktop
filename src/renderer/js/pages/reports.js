@@ -2,20 +2,48 @@
 
 (function () {
   const A = window.App;
-  const state = { mode: 'bulanan', month: null, date: null, departmentId: '', search: '' };
+  const state = { mode: 'bulanan', month: null, date: null, from: null, to: null, departmentId: '', search: '' };
+  const MAX_RANGE_DAYS = 366;
+
+  /** Mode ringkasan per karyawan: satu bulan penuh, atau rentang tanggal bebas. */
+  const isSummaryMode = () => state.mode === 'bulanan' || state.mode === 'rentang';
+
+  /** Batas tanggal yang sedang ditampilkan, dipakai rincian & kartu PDF. */
+  function currentBounds() {
+    return state.mode === 'rentang' ? { start: state.from, end: state.to } : monthBounds(state.month);
+  }
+
+  function periodLabel() {
+    return state.mode === 'rentang'
+      ? `${A.fmt.dateLong(state.from)} s/d ${A.fmt.dateLong(state.to)}`
+      : A.fmt.monthLabel(state.month);
+  }
+
+  const dayCount = (from, to) => {
+    const [y1, m1, d1] = from.split('-').map(Number);
+    const [y2, m2, d2] = to.split('-').map(Number);
+    return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000) + 1;
+  };
 
   function statusBadge(r) {
     return `<span class="badge" style="background:${A.esc(r.status_color)}">${A.esc(r.status_label)}</span>`;
   }
 
-  async function renderMonthly(root, depts) {
-    const data = await A.call('reports.monthly', {
-      month: state.month,
+  async function renderSummary(root, depts) {
+    const filter = {
       departmentId: state.departmentId ? Number(state.departmentId) : null,
       search: state.search,
-    });
+    };
+    const data =
+      state.mode === 'rentang'
+        ? await A.call('reports.range', { ...filter, from: state.from, to: state.to })
+        : await A.call('reports.monthly', { ...filter, month: state.month });
 
-    A.setSubtitle(`Periode ${A.fmt.monthLabel(state.month)} • ${data.summary.length} karyawan`);
+    A.setSubtitle(`Periode ${periodLabel()} • ${data.dates.length} hari • ${data.summary.length} karyawan`);
+    // Angka ringkasan di atas tetap dihitung dari SELURUH karyawan, bukan halaman ini.
+    const hal = A.paginate('reports-summary', data.summary, {
+      resetOn: [state.mode, state.month, state.from, state.to, state.departmentId, state.search],
+    });
     A.setActions(
       `<button id="btnExcel">Export Excel</button>
        <button id="btnPdf">Cetak PDF</button>`,
@@ -89,10 +117,11 @@
                 render: (s) => `<button class="btn-sm" data-act="detail" data-id="${s.employee_id}" data-name="${A.esc(s.employee_name)}">Rincian</button>`,
               },
             ],
-            data.summary,
+            hal.rows,
             { empty: 'Tidak ada data pada periode ini.' }
           )}
         </div>
+        ${hal.controls}
       </div>
     `;
     return data;
@@ -131,6 +160,9 @@
     );
 
     const count = (code) => rows.filter((r) => r.status === code).length;
+    const hal = A.paginate('reports-daily', rows, {
+      resetOn: [state.date, state.departmentId, state.search],
+    });
 
     root.innerHTML = `
       ${filterBar(depts)}
@@ -157,16 +189,17 @@
               { label: 'Lembur', className: 'c num nowrap', render: (r) => A.fmt.duration(r.overtime_minutes) },
               { label: 'Status', className: 'c', render: statusBadge },
             ],
-            rows,
+            hal.rows,
             { empty: 'Tidak ada data pada tanggal ini.' }
           )}
         </div>
+        ${hal.controls}
       </div>
     `;
   }
 
   async function showDetail(employeeId, name) {
-    const b = monthBounds(state.month);
+    const b = currentBounds();
     const { rows, summary } = await A.call('reports.employeeCard', {
       employeeId,
       from: b.start,
@@ -203,7 +236,8 @@
       footer: '<button data-close>Tutup</button><button class="btn-primary" data-pdf>Cetak Kartu PDF</button>',
       onOpen: (box) => {
         A.$('[data-pdf]', box).addEventListener('click', async () => {
-          const res = await A.callSafe('export.employeeCardPdf', { employeeId, month: state.month });
+          const periode = state.mode === 'rentang' ? { from: state.from, to: state.to } : { month: state.month };
+          const res = await A.callSafe('export.employeeCardPdf', { employeeId, ...periode });
           if (res && res.ok) {
             A.toast('Kartu absensi tersimpan', 'ok');
             await A.callSafe('file.open', { filePath: res.filePath });
@@ -225,6 +259,7 @@
       departmentId: state.departmentId ? Number(state.departmentId) : null,
       search: state.search,
     };
+    if (state.mode === 'rentang') return { ...base, from: state.from, to: state.to };
     return state.mode === 'bulanan' ? { ...base, month: state.month } : { ...base, date: state.date };
   }
 
@@ -232,12 +267,17 @@
     return `<div class="toolbar">
       <select id="mode" style="width:auto">
         <option value="bulanan"${state.mode === 'bulanan' ? ' selected' : ''}>Rekap Bulanan</option>
+        <option value="rentang"${state.mode === 'rentang' ? ' selected' : ''}>Rekap Rentang Tanggal</option>
         <option value="harian"${state.mode === 'harian' ? ' selected' : ''}>Rekap Harian</option>
       </select>
       ${
         state.mode === 'bulanan'
           ? `<input type="month" id="month" value="${A.esc(state.month)}" style="width:auto" />`
-          : `<input type="date" id="date" value="${A.esc(state.date)}" style="width:auto" />`
+          : state.mode === 'rentang'
+            ? `<input type="date" id="from" value="${A.esc(state.from)}" style="width:auto" title="Tanggal awal" />
+               <span class="muted small">s/d</span>
+               <input type="date" id="to" value="${A.esc(state.to)}" style="width:auto" title="Tanggal akhir" />`
+            : `<input type="date" id="date" value="${A.esc(state.date)}" style="width:auto" />`
       }
       <select id="dept">
         <option value="">Semua Departemen</option>
@@ -254,9 +294,11 @@
     async render(root) {
       if (!state.month) state.month = A.fmt.currentMonth();
       if (!state.date) state.date = A.fmt.today();
+      if (!state.from) state.from = `${A.fmt.currentMonth()}-01`;
+      if (!state.to) state.to = A.fmt.today();
 
       const depts = await A.call('departments.list');
-      if (state.mode === 'bulanan') await renderMonthly(root, depts);
+      if (isSummaryMode()) await renderSummary(root, depts);
       else await renderDaily(root, depts);
 
       A.$('#mode', root).addEventListener('change', (e) => {
@@ -270,6 +312,29 @@
           A.refresh();
         });
       }
+      // Rentang dijaga tetap sah di sini: galat dari proses utama akan
+      // mengganti seluruh halaman, termasuk kotak tanggal untuk membetulkannya.
+      const gantiRentang = (from, to) => {
+        if (!from || !to) return;
+        if (from > to) {
+          A.toast('Tanggal awal tidak boleh setelah tanggal akhir', 'warn');
+          A.refresh();
+          return;
+        }
+        if (dayCount(from, to) > MAX_RANGE_DAYS) {
+          A.toast(`Rentang rekap maksimal ${MAX_RANGE_DAYS} hari`, 'warn');
+          A.refresh();
+          return;
+        }
+        state.from = from;
+        state.to = to;
+        A.refresh();
+      };
+      const fromEl = A.$('#from', root);
+      if (fromEl) fromEl.addEventListener('change', (e) => gantiRentang(e.target.value, state.to));
+      const toEl = A.$('#to', root);
+      if (toEl) toEl.addEventListener('change', (e) => gantiRentang(state.from, e.target.value));
+
       const dateEl = A.$('#date', root);
       if (dateEl) {
         dateEl.addEventListener('change', (e) => {

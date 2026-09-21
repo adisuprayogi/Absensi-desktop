@@ -12,9 +12,17 @@ const { reports } = require('./services/reports');
 const exporter = require('./services/exporter');
 const backup = require('./services/backup');
 const { fingerprints } = require('./services/fingerprints');
+const { auth, authorize } = require('./services/auth');
+const { audit } = require('./services/audit');
 const { diagnose } = require('./zk/diagnose');
-const { todayStr, currentMonthStr } = require('./util/datetime');
+const { todayStr, currentMonthStr, toDateTimeStr } = require('./util/datetime');
 const { AUTHOR, COPYRIGHT } = require('./util/branding');
+
+/**
+ * Pengguna yang sedang masuk. Satu instansi aplikasi = satu sesi, jadi cukup
+ * disimpan di sini; halaman tidak pernah memegang token apa pun.
+ */
+const session = { user: null };
 
 /**
  * Semua fungsi yang boleh dipanggil dari halaman aplikasi.
@@ -39,11 +47,80 @@ function buildHandlers(manager, getWindow) {
       author: AUTHOR,
       copyright: COPYRIGHT,
       dbPath: db.getPath(),
+      // Nama perusahaan untuk layar login; pengaturan lain baru bisa dibaca setelah masuk.
+      companyName: settings.get('company_name', ''),
       today: todayStr(),
       month: currentMonthStr(),
       platform: process.platform,
       electron: process.versions.electron,
     }),
+
+    // ------------------------------------------------------ masuk & keluar
+    'auth.status': () => ({
+      needsSetup: auth.needsSetup(),
+      user: session.user,
+      minPassword: auth.MIN_PASSWORD,
+    }),
+    'auth.setup': (p) => {
+      const hasil = auth.setup(p);
+      session.user = hasil.user;
+      audit.log(hasil.user, 'Buat Admin pertama', hasil.user.username);
+      return hasil;
+    },
+    'auth.login': (p) => {
+      try {
+        session.user = auth.login(p);
+      } catch (err) {
+        audit.log(null, 'Gagal masuk', `nama pengguna: ${String((p && p.username) || '').slice(0, 40)}`);
+        throw err;
+      }
+      audit.log(session.user, 'Masuk');
+      return session.user;
+    },
+    'auth.logout': ({ reason = null } = {}) => {
+      if (session.user) audit.log(session.user, reason === 'idle' ? 'Terkunci otomatis' : 'Keluar');
+      session.user = null;
+      return true;
+    },
+    'auth.recover': (p) => {
+      const hasil = auth.recover(p);
+      session.user = hasil.user;
+      audit.log(hasil.user, 'Atur ulang password dengan kode pemulihan');
+      return hasil;
+    },
+    'auth.changePassword': (p) => {
+      session.user = auth.changePassword(session.user.id, p);
+      audit.log(session.user, 'Ganti password sendiri');
+      return session.user;
+    },
+
+    // ------------------------------------------- pengguna (khusus Admin)
+    'users.list': () => ({ users: auth.list(), recovery: auth.recoveryCodeInfo() }),
+    'users.create': (p) => {
+      const user = auth.create(p);
+      audit.log(session.user, 'Tambah pengguna', `${user.username} (${user.role_label})`);
+      return user;
+    },
+    'users.update': ({ id, ...rest }) => {
+      const user = auth.update(session.user.id, id, rest);
+      audit.log(
+        session.user,
+        'Ubah pengguna',
+        `${user.username}: ${user.role_label}, ${user.active ? 'aktif' : 'nonaktif'}`
+      );
+      return user;
+    },
+    'users.resetPassword': ({ id, password }) => {
+      const user = auth.resetPassword(id, password);
+      audit.log(session.user, 'Reset password pengguna', user.username);
+      return user;
+    },
+    'users.regenerateRecovery': ({ password }) => {
+      const code = auth.regenerateRecoveryCode(session.user.id, password);
+      audit.log(session.user, 'Buat ulang kode pemulihan');
+      return { recoveryCode: code };
+    },
+    'audit.list': (p = {}) => audit.list(p),
 
     // ---------------------------------------------------------- pengaturan
     'settings.all': () => settings.all(),
@@ -73,6 +150,8 @@ function buildHandlers(manager, getWindow) {
     'employees.setActiveMany': ({ ids, active }) => employees.setActiveMany(ids, active),
     'employees.importFromDevice': ({ rows, departmentId, defaultShiftId }) =>
       employees.importFromDevice(rows, { departmentId, defaultShiftId }),
+    'employees.nextPin': () => employees.nextPin(),
+    'employees.pinConflicts': ({ pin, id = null }) => employees.pinConflicts(pin, id),
     'employees.relinkLogs': () => {
       relinkLogs();
       return true;
@@ -122,7 +201,8 @@ function buildHandlers(manager, getWindow) {
     'devices.adoptFromDevice': ({ deviceId, pins }) => devices.adoptFromDevice(deviceId, pins),
 
     // --------------------------------- kirim data karyawan ke mesin
-    'device.pushEmployees': ({ id, employeeIds }) => manager.pushEmployees(id, employeeIds),
+    'device.pushEmployees': ({ id, employeeIds, overwrite = false, skipPins = [] }) =>
+      manager.pushEmployees(id, employeeIds, { overwrite, skipPins }),
     /** pins = null berarti hapus SELURUH user di mesin. */
     'device.removeUsers': ({ id, pins = null }) => manager.removeDeviceUsers(id, pins),
     // Sidik jari ikut otomatis: dibaca saat "Baca Ulang dari Mesin",
@@ -136,12 +216,19 @@ function buildHandlers(manager, getWindow) {
     'device.diagnose': async ({ id }) => {
       const d = devices.find(id);
       if (!d) throw new Error('Mesin absensi tidak ditemukan');
+      // Live dihentikan supaya pemindaian tidak berebut socket dengan
+      // koneksi realtime, lalu dinyalakan lagi apa pun hasilnya (tanpa
+      // ditunggu: mesin yang bermasalah bisa butuh sampai timeout).
       await manager.stopLive(id).catch(() => {});
-      return diagnose({ ip: d.ip, port: d.port, commKey: d.comm_key, protocol: d.protocol });
+      try {
+        return await diagnose({ ip: d.ip, port: d.port, commKey: d.comm_key, protocol: d.protocol });
+      } finally {
+        manager.resumeLive(id).catch(() => {});
+      }
     },
     'device.syncUsers': ({ id }) => manager.syncUsers(id),
-    'device.pull': ({ id }) => manager.pull(id),
-    'device.pullAll': () => manager.pullAll(),
+    'device.pull': ({ id, from = null, to = null }) => manager.pull(id, { from, to }),
+    'device.pullAll': ({ from = null, to = null } = {}) => manager.pullAll({ from, to }),
     'device.setTime': ({ id }) => manager.setDeviceTime(id, new Date()),
     'device.clearAttendance': ({ id }) => manager.clearDeviceAttendance(id),
     'device.restart': ({ id }) => manager.restartDevice(id),
@@ -167,8 +254,9 @@ function buildHandlers(manager, getWindow) {
     'reports.employeeCard': (p) => reports.employeeCard(p),
 
     // ------------------------------------------------------------- ekspor
+    // Rekap ringkasan dan kartu absensi menerima `month` atau `from`/`to`.
     'export.monthlyExcel': async (p) => {
-      const file = await saveDialog(`Rekap-Absensi-${p.month}.xlsx`, [{ name: 'Excel', extensions: ['xlsx'] }]);
+      const file = await saveDialog(`Rekap-Absensi-${periodName(p)}.xlsx`, [{ name: 'Excel', extensions: ['xlsx'] }]);
       if (!file) return { ok: false, canceled: true };
       const res = await exporter.monthlyExcel(file, p);
       return afterExport(file, res);
@@ -186,7 +274,7 @@ function buildHandlers(manager, getWindow) {
       return afterExport(file, res);
     },
     'export.monthlyPdf': async (p) => {
-      const file = await saveDialog(`Rekap-Absensi-${p.month}.pdf`, [{ name: 'PDF', extensions: ['pdf'] }]);
+      const file = await saveDialog(`Rekap-Absensi-${periodName(p)}.pdf`, [{ name: 'PDF', extensions: ['pdf'] }]);
       if (!file) return { ok: false, canceled: true };
       const res = await exporter.htmlToPdf(exporter.monthlyPdfHtml(p), file, { landscape: true });
       return afterExport(file, res);
@@ -198,7 +286,7 @@ function buildHandlers(manager, getWindow) {
       return afterExport(file, res);
     },
     'export.employeeCardPdf': async (p) => {
-      const file = await saveDialog(`Kartu-Absensi-${p.month}.pdf`, [{ name: 'PDF', extensions: ['pdf'] }]);
+      const file = await saveDialog(`Kartu-Absensi-${periodName(p)}.pdf`, [{ name: 'PDF', extensions: ['pdf'] }]);
       if (!file) return { ok: false, canceled: true };
       const res = await exporter.htmlToPdf(exporter.employeeCardPdfHtml(p), file, { landscape: false });
       return afterExport(file, res);
@@ -259,11 +347,25 @@ function buildHandlers(manager, getWindow) {
       const periksa = backup.inspect(filePath);
       if (!periksa.ok) return { ok: false, error: periksa.error };
 
+      // Tercatat di database lama (ikut ke salinan pengaman) DAN dititipkan
+      // untuk database hasil pemulihan, yang belum punya catatan ini.
+      const detail = `${path.basename(filePath)} (${periksa.employees} karyawan, ${periksa.logs} log)`;
+      audit.log(session.user, 'Pulihkan backup', detail);
+
       await manager.shutdown();
       exporter.closePdfWindow();
 
       const hasil = await backup.restore(filePath);
       if (!hasil.ok) return hasil;
+      audit.savePending([
+        {
+          at: toDateTimeStr(new Date()),
+          user_id: session.user && session.user.id,
+          username: session.user && session.user.username,
+          action: 'Pulihkan backup',
+          detail,
+        },
+      ]);
 
       setTimeout(() => {
         app.relaunch({ args: process.argv.slice(1) });
@@ -274,14 +376,73 @@ function buildHandlers(manager, getWindow) {
   };
 }
 
+/**
+ * Tindakan penting yang otomatis tercatat di catatan aktivitas. Keterangannya
+ * disusun SEBELUM perintah dijalankan, supaya nama data yang dihapus masih
+ * bisa dibaca.
+ */
+const AUDITED = {
+  'attendance.addManual': ['Tambah scan manual', (p) => `${employeeLabel(p.employeeId)} — ${p.ts}${p.note ? ` (${p.note})` : ''}`],
+  'attendance.remove': ['Hapus log scan', (p) => logLabel(p.id)],
+  'attendance.removeRange': ['Hapus log scan per rentang', (p) => `${p.from} s/d ${p.to}`],
+  'employees.remove': ['Hapus karyawan', (p) => employeeLabel(p.id)],
+  'employees.removeMany': ['Hapus karyawan massal', (p) => listLabel((p.ids || []).map(employeeLabel))],
+  'leaves.remove': ['Hapus izin/cuti', (p) => `#${p.id}`],
+  'devices.remove': ['Hapus mesin absensi', (p) => deviceLabel(p.id)],
+  'device.removeUsers': ['Hapus user di mesin', (p) =>
+    `${deviceLabel(p.id)}: ${p.pins ? `${p.pins.length} user (PIN ${listLabel(p.pins)})` : 'SEMUA user'}`],
+  'device.clearAttendance': ['Kosongkan log di mesin', (p) => deviceLabel(p.id)],
+  'fingerprints.remove': ['Hapus sidik jari tersimpan', (p) => (p.pins ? `PIN ${listLabel(p.pins)}` : 'semua')],
+  'settings.save': ['Ubah pengaturan', (p) => Object.keys(p || {}).join(', ')],
+};
+
+function employeeLabel(id) {
+  const e = employees.find(id);
+  return e ? `${e.pin} — ${e.name}` : `#${id}`;
+}
+
+function deviceLabel(id) {
+  const d = devices.find(id);
+  return d ? `${d.name} (${d.ip})` : `#${id}`;
+}
+
+function logLabel(id) {
+  const l = db.get().prepare('SELECT user_pin, ts FROM attendance_logs WHERE id = ?').get(id);
+  return l ? `PIN ${l.user_pin} — ${l.ts}` : `#${id}`;
+}
+
+function listLabel(items) {
+  return items.length > 10 ? `${items.slice(0, 10).join(', ')}, … (+${items.length - 10})` : items.join(', ');
+}
+
 function register(manager, getWindow) {
   const handlers = buildHandlers(manager, getWindow);
 
   ipcMain.handle('api:call', async (_event, name, payload) => {
     const handler = handlers[name];
     if (!handler) return { ok: false, error: `Perintah tidak dikenal: ${name}` };
+
+    // Selalu dibaca ulang: akun yang baru dinonaktifkan langsung kehilangan akses.
+    if (session.user) session.user = auth.current(session.user.id);
+    const ditolak = authorize(name, session.user);
+    if (ditolak) return { ok: false, error: ditolak.message, code: ditolak.code };
+
+    const catat = AUDITED[name];
+    let detail = null;
+    if (catat) {
+      try {
+        detail = catat[1](payload || {});
+      } catch {
+        detail = null;
+      }
+    }
+
     try {
       const data = await handler(payload || {});
+      if (catat && !(data && data.canceled)) {
+        const gagal = data && data.ok === false ? ` (gagal: ${data.error || 'tidak diketahui'})` : '';
+        audit.log(session.user, catat[0], `${detail || ''}${gagal}`);
+      }
       return { ok: true, data };
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -297,6 +458,11 @@ function register(manager, getWindow) {
   for (const evt of ['live-scan', 'live-status', 'sync-start', 'sync-done', 'sync-error', 'device-status', 'users-synced', 'autosync-status', 'progress']) {
     manager.on(evt, forward(evt));
   }
+}
+
+/** Potongan nama berkas ekspor: '2026-09' atau '2026-08-21_sd_2026-09-20'. */
+function periodName(p) {
+  return p.from && p.to ? `${p.from}_sd_${p.to}` : p.month;
 }
 
 /** Terjemahkan galat SQLite yang sering muncul menjadi bahasa manusia. */

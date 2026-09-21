@@ -3,11 +3,23 @@
 const { EventEmitter } = require('node:events');
 
 const { ZKClient } = require('./client');
-const { devices } = require('../services/devices');
+const { devices, samePerson } = require('../services/devices');
 const { insertLogs } = require('../services/attendance');
 const { settings, employees } = require('../services/masters');
 const { fingerprints } = require('../services/fingerprints');
-const { toDateTimeStr } = require('../util/datetime');
+const { toDateStr, toDateTimeStr } = require('../util/datetime');
+
+const TANGGAL = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Periksa periode tarik data; null bila tidak dibatasi. */
+function checkPeriod(from, to) {
+  if (!from && !to) return null;
+  if (!TANGGAL.test(String(from || '')) || !TANGGAL.test(String(to || ''))) {
+    throw new Error('Periode tarik data harus berisi tanggal awal dan akhir.');
+  }
+  if (from > to) throw new Error('Tanggal awal periode tidak boleh setelah tanggal akhir.');
+  return { from, to };
+}
 
 /**
  * Mengelola seluruh koneksi ke mesin absensi:
@@ -226,14 +238,23 @@ class DeviceManager extends EventEmitter {
    *
    * Sidik jari hanya ikut bila sudah pernah diunduh dari mesin lain — merekam
    * jari baru tetap harus lewat sensor di mesin.
+   *
+   * Pengaman: bila di mesin PIN yang sama dipakai orang lain (namanya berbeda),
+   * tidak ada yang ditulis — hasilnya `needsConfirm` beserta daftarnya. Menimpa
+   * orang itu membuat sidik jarinya menjadi milik karyawan kita. Panggil ulang
+   * dengan `overwrite: true` untuk tetap menimpa, atau `skipPins` untuk
+   * melewati PIN yang bentrok.
    */
-  pushEmployees(deviceId, employeeIds) {
+  pushEmployees(deviceId, employeeIds, { overwrite = false, skipPins = [] } = {}) {
     const device = this._device(deviceId);
     return this._enqueue(deviceId, async () => {
+      const lewati = new Set((skipPins || []).map(String));
       const rows = employeeIds
         .map((id) => employees.find(id))
-        .filter(Boolean);
-      if (!rows.length) return { ok: false, error: 'Tidak ada karyawan yang dipilih' };
+        .filter(Boolean)
+        .filter((e) => !lewati.has(String(e.pin)));
+      if (!rows.length) return { ok: false, error: 'Tidak ada karyawan yang dikirim' };
+      let perluKonfirmasi = null;
 
       const sent = [];
       const failed = [];
@@ -259,6 +280,25 @@ class DeviceManager extends EventEmitter {
               jariPerPin.get(pin).push({ fid: t.finger_id, valid: t.valid, template: t.template });
             }
             const byPin = new Map(existing.map((u) => [String(u.userId), u]));
+
+            // Dibaca langsung dari mesin barusan, bukan dari data sinkron lama.
+            const bentrok = rows.filter((emp) => {
+              const u = byPin.get(String(emp.pin));
+              return u && !samePerson(emp.name, u.name);
+            });
+            if (bentrok.length && !overwrite) {
+              const jariDiMesin = new Map(
+                devices.deviceUsers(deviceId).map((du) => [String(du.user_pin), du.finger_count || 0])
+              );
+              perluKonfirmasi = bentrok.map((emp) => ({
+                pin: String(emp.pin),
+                name: emp.name,
+                deviceName: byPin.get(String(emp.pin)).name,
+                fingers: jariDiMesin.get(String(emp.pin)) || 0,
+              }));
+              return;
+            }
+
             const usedUids = new Set(existing.map((u) => u.uid));
             let nextUid = 1;
 
@@ -309,6 +349,11 @@ class DeviceManager extends EventEmitter {
         this._progress(deviceId, judul, 'Gagal', { done: true });
         devices.setStatus(deviceId, `Gagal kirim karyawan: ${err.message}`);
         return { ok: false, error: err.message, sent, failed };
+      }
+
+      if (perluKonfirmasi) {
+        this._progress(deviceId, judul, 'Menunggu konfirmasi: ada PIN yang dipakai orang lain di mesin', { done: true });
+        return { ok: false, needsConfirm: true, conflicts: perluKonfirmasi, total: rows.length };
       }
 
       // Data aplikasi kini sudah ada di mesin: catat sebagai kondisi disepakati,
@@ -409,9 +454,16 @@ class DeviceManager extends EventEmitter {
     });
   }
 
-  /** Tarik log absensi dari satu mesin. */
-  pull(deviceId, { silent = false } = {}) {
+  /**
+   * Tarik log absensi dari satu mesin.
+   *
+   * `from`/`to` ('YYYY-MM-DD', inklusif) membatasi log yang DISIMPAN. Protokol
+   * mesin tidak bisa meminta log per tanggal, jadi semua log tetap diunduh
+   * lalu disaring di sini.
+   */
+  pull(deviceId, { silent = false, from = null, to = null } = {}) {
     const device = this._device(deviceId);
+    const periode = checkPeriod(from, to);
     return this._enqueue(deviceId, async () => {
       if (this.syncing.has(deviceId)) return { ok: false, error: 'Penarikan data sedang berjalan' };
       this.syncing.add(deviceId);
@@ -428,14 +480,28 @@ class DeviceManager extends EventEmitter {
           }
         });
 
-        const result = insertLogs(deviceId, records, 'tarik');
+        const dipilih = periode
+          ? records.filter((r) => {
+              const tgl = toDateStr(r.timestamp);
+              return tgl >= periode.from && tgl <= periode.to;
+            })
+          : records;
+        const result = {
+          ...insertLogs(deviceId, dipilih, 'tarik'),
+          fetched: dipilih.length,
+          onDevice: records.length,
+          outOfRange: records.length - dipilih.length,
+          from: periode ? periode.from : null,
+          to: periode ? periode.to : null,
+        };
+        const keterangan = periode ? ` (periode ${periode.from} s/d ${periode.to})` : '';
         devices.logSyncEnd(historyId, {
           ok: true,
           fetched: result.fetched,
           inserted: result.inserted,
-          message: `${result.inserted} baru, ${result.duplicate} duplikat`,
+          message: `${result.inserted} baru, ${result.duplicate} duplikat${keterangan}`,
         });
-        devices.setStatus(deviceId, `Tarik data: ${result.inserted} baru dari ${result.fetched}`, { lastSync: true });
+        devices.setStatus(deviceId, `Tarik data: ${result.inserted} baru dari ${result.fetched}${keterangan}`, { lastSync: true });
         this.emit('sync-done', { deviceId, name: device.name, ...result });
         return { ok: true, ...result };
       } catch (err) {
@@ -450,11 +516,12 @@ class DeviceManager extends EventEmitter {
   }
 
   /** Tarik dari semua mesin aktif. */
-  async pullAll({ onlyAutoSync = false, silent = false } = {}) {
+  async pullAll({ onlyAutoSync = false, silent = false, from = null, to = null } = {}) {
+    checkPeriod(from, to);
     const list = devices.list().filter((d) => d.active && (!onlyAutoSync || d.auto_sync));
     const results = [];
     for (const d of list) {
-      results.push({ deviceId: d.id, name: d.name, ...(await this.pull(d.id, { silent })) });
+      results.push({ deviceId: d.id, name: d.name, ...(await this.pull(d.id, { silent, from, to })) });
     }
     return results;
   }
@@ -487,7 +554,7 @@ class DeviceManager extends EventEmitter {
   async restartDevice(deviceId) {
     const device = this._device(deviceId);
     await this.stopLive(deviceId);
-    return this._enqueue(deviceId, async () => {
+    const result = await this._enqueue(deviceId, async () => {
       try {
         await this._withClient(device, (client) => client.restart());
         return { ok: true };
@@ -495,6 +562,11 @@ class DeviceManager extends EventEmitter {
         return { ok: false, error: err.message };
       }
     });
+    // Mesin sedang menyala ulang: sambungan pertama biasanya gagal, lalu
+    // penjadwal sambung ulang mencoba lagi dengan jeda bertambah. Tidak
+    // ditunggu, supaya tombol Restart tidak ikut menanti timeout koneksi.
+    this.resumeLive(deviceId).catch(() => {});
+    return result;
   }
 
   // -------------------------------------------------------- live capture
@@ -518,7 +590,16 @@ class DeviceManager extends EventEmitter {
       protocol: device.protocol,
     });
 
+    // Event yang sama persis (PIN + jam) yang dikirim ulang mesin cukup
+    // diproses sekali. Pengaman bila ada firmware yang tetap mengulang event
+    // walau sudah di-ACK; tanpa ini feed Dashboard terisi scan yang sama terus.
+    const sudahDiproses = new Set();
     client.on('attendance', (rec) => {
+      const kunci = `${rec.userId}|${rec.timestamp.getTime()}`;
+      if (sudahDiproses.has(kunci)) return;
+      sudahDiproses.add(kunci);
+      if (sudahDiproses.size > 500) sudahDiproses.delete(sudahDiproses.values().next().value);
+
       const result = insertLogs(device.id, [rec], 'realtime');
       const emp = employees.findByPin(rec.userId);
       this.emit('live-scan', {
@@ -587,6 +668,17 @@ class DeviceManager extends EventEmitter {
     }
     this.emit('live-status', { deviceId, active: false, message: 'Realtime dimatikan' });
     return { ok: true };
+  }
+
+  /**
+   * Nyalakan lagi live capture satu mesin setelah sengaja dihentikan
+   * sementara (diagnosa, restart) — hanya bila pengaturannya memang aktif.
+   */
+  async resumeLive(deviceId) {
+    if (settings.get('live_capture_enabled', '1') !== '1') return { ok: true, skipped: true };
+    const device = devices.find(deviceId);
+    if (!device || !device.active || !device.live_capture) return { ok: true, skipped: true };
+    return this.startLive(deviceId);
   }
 
   liveStatus() {

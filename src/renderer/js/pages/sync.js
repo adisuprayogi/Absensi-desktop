@@ -3,6 +3,9 @@
 (function () {
   const A = window.App;
   const state = { deviceId: null, appFilter: '', deviceFilter: '', appSearch: '', deviceSearch: '' };
+  // Baris terpilih per tabel. Disimpan di sini, bukan dibaca dari kotak centang,
+  // supaya pilihan di halaman tabel lain tidak hilang saat berpindah halaman.
+  const pilih = { app: new Set(), device: new Set() };
 
   const PRIVILEGE_LABEL = { 0: 'Pengguna', 2: 'Pendaftar', 12: 'Manajer', 14: 'Administrator' };
   const priv = (v) => PRIVILEGE_LABEL[Number(v) || 0] || `Kode ${v}`;
@@ -23,21 +26,58 @@
     beda: { app: 'Berbeda', device: 'Berbeda', color: '#f97316' },
   };
 
+  /**
+   * Mesin menolak ditimpa diam-diam: PIN yang dikirim ternyata dipakai orang
+   * lain (namanya berbeda) di mesin. Admin memilih melewati, menimpa, atau batal.
+   */
+  function overwriteDialog(res, device) {
+    const semuaBentrok = res.conflicts.length >= res.total;
+    const baris = res.conflicts
+      .map((k) => `<tr>
+        <td class="c num"><strong>${A.esc(k.pin)}</strong></td>
+        <td>${A.esc(k.name)}</td>
+        <td>${A.esc(k.deviceName || '(tanpa nama)')}</td>
+        <td class="c">${k.fingers ? `<strong>${k.fingers}</strong>` : '<span class="muted">-</span>'}</td>
+      </tr>`)
+      .join('');
+    return A.modal({
+      title: 'PIN Dipakai Orang Lain di Mesin',
+      wide: true,
+      body: `
+        <p style="margin-top:0">${res.conflicts.length} dari ${res.total} karyawan yang akan dikirim memakai PIN yang
+        di <strong>${A.esc(device.name)}</strong> terdaftar atas nama orang lain. Belum ada yang diubah di mesin.</p>
+        <div class="table-wrap" style="margin-bottom:12px"><table class="data">
+          <thead><tr><th class="c">PIN</th><th>Di Aplikasi</th><th>Di Mesin Sekarang</th><th class="c">Sidik Jari di Mesin</th></tr></thead>
+          <tbody>${baris}</tbody>
+        </table></div>
+        <div class="warn-bar" style="margin:0">
+          Bila ditimpa, data orang di mesin diganti dengan data aplikasi dan <b>sidik jarinya ikut menjadi milik
+          karyawan aplikasi</b>. Timpa hanya bila Anda yakin itu orang yang sama (mis. namanya baru diganti).
+        </div>`,
+      footer: `
+        <button data-choice="cancel">Batal</button>
+        ${semuaBentrok ? '' : `<button class="btn-primary" data-choice="skip">Kirim Tanpa yang Bentrok (${res.total - res.conflicts.length})</button>`}
+        <button class="btn-danger" data-choice="overwrite">Tetap Timpa Semua</button>`,
+      onOpen: (box) => {
+        A.$$('[data-choice]', box).forEach((b) => b.addEventListener('click', () => A.closeModal(b.dataset.choice)));
+      },
+    });
+  }
+
   function statusBadge(status, sisi) {
     const s = STATUS[status] || STATUS.beda;
     return `<span class="badge" style="background:${s.color}">${A.esc(s[sisi] || s.app || s.device)}</span>`;
   }
 
   function checkbox(group, value) {
-    return `<input type="checkbox" class="pick" data-group="${group}" value="${A.esc(value)}">`;
+    const checked = pilih[group].has(String(value)) ? ' checked' : '';
+    return `<input type="checkbox" class="pick" data-group="${group}" value="${A.esc(value)}"${checked}>`;
   }
   function selectAllHeader(group) {
     return `<input type="checkbox" class="pick-all" data-group="${group}" title="Pilih semua yang tampil">`;
   }
-  function picked(root, group) {
-    return A.$$(`.pick[data-group="${group}"]`, root)
-      .filter((c) => c.checked)
-      .map((c) => c.value);
+  function picked(group) {
+    return [...pilih[group]];
   }
 
 
@@ -160,6 +200,12 @@
       const deviceRows = applyFilter(data.device, state.deviceFilter, state.deviceSearch, 'device');
       const perluTindakan = c.hanyaApp + c.hanyaMesin + c.ubahApp + c.ubahMesin + c.bentrok + c.beda;
 
+      A.prunePicks(pilih.app, appRows.map((r) => String(r.employee_id)));
+      A.prunePicks(pilih.device, deviceRows.map((r) => String(r.pin)));
+      const halApp = A.paginate('sync-app', appRows, { resetOn: [deviceId, state.appFilter, state.appSearch] });
+      const halDev = A.paginate('sync-device', deviceRows, { resetOn: [deviceId, state.deviceFilter, state.deviceSearch] });
+      const cocok = { app: appRows, device: deviceRows };
+
       root.innerHTML = `
         <div class="toolbar">
           <select id="device" style="min-width:250px">
@@ -190,8 +236,8 @@
           : ''}
 
         <div class="sync-split">
-          ${tabelAplikasi(appRows, data.app, device)}
-          ${tabelMesin(deviceRows, data.device, device)}
+          ${tabelAplikasi(halApp, appRows.length, data.app, device)}
+          ${tabelMesin(halDev, deviceRows.length, data.device, device)}
         </div>
 
         ${perluTindakan === 0 && data.device.length
@@ -202,6 +248,8 @@
       // ---- filter & pencarian
       A.$('#device', root).addEventListener('change', (e) => {
         state.deviceId = e.target.value;
+        pilih.app.clear();
+        pilih.device.clear();
         state.appFilter = '';
         state.deviceFilter = '';
         state.appSearch = '';
@@ -237,18 +285,63 @@
         });
       }
 
-      A.$$('.pick-all', root).forEach((all) => {
-        all.addEventListener('change', () => {
-          A.$$(`.pick[data-group="${all.dataset.group}"]`, root).forEach((c2) => {
-            c2.checked = all.checked;
+      // ---- pilihan baris: header hanya mencentang halaman yang tampil
+      const kotak = (group) => A.$$(`.pick[data-group="${group}"]`, root);
+      function segarkanPilihan(group) {
+        const n = pilih[group].size;
+        const dicentang = kotak(group).filter((c2) => c2.checked).length;
+        const all = A.$(`.pick-all[data-group="${group}"]`, root);
+        if (all) {
+          all.checked = dicentang > 0 && dicentang === kotak(group).length;
+          all.indeterminate = dicentang > 0 && dicentang < kotak(group).length;
+        }
+        const info = A.$(`[data-pick-info="${group}"]`, root);
+        if (!info) return;
+        const total = cocok[group].length;
+        info.innerHTML = !n
+          ? ''
+          : ` • <strong>${n} dipilih</strong>` +
+            (n < total && dicentang === kotak(group).length
+              ? ` <button class="link" data-act="pickAll" data-group="${group}">pilih semua ${total}</button>`
+              : n > dicentang ? ` <span>(${n - dicentang} di halaman lain)</span>` : '') +
+            ` <button class="link" data-act="pickClear" data-group="${group}">batal</button>`;
+      }
+      ['app', 'device'].forEach((group) => {
+        kotak(group).forEach((c2) =>
+          c2.addEventListener('change', () => {
+            if (c2.checked) pilih[group].add(c2.value);
+            else pilih[group].delete(c2.value);
+            segarkanPilihan(group);
+          })
+        );
+        const all = A.$(`.pick-all[data-group="${group}"]`, root);
+        if (all) {
+          all.addEventListener('change', () => {
+            kotak(group).forEach((c2) => {
+              c2.checked = all.checked;
+              if (c2.checked) pilih[group].add(c2.value);
+              else pilih[group].delete(c2.value);
+            });
+            segarkanPilihan(group);
           });
-        });
+        }
+        segarkanPilihan(group);
       });
 
       // ---- aksi
       A.bindActions(root, {
+        pickAll: (d) => {
+          cocok[d.group].forEach((r) => pilih[d.group].add(String(d.group === 'app' ? r.employee_id : r.pin)));
+          segarkanPilihan(d.group);
+        },
+        pickClear: (d) => {
+          pilih[d.group].clear();
+          kotak(d.group).forEach((c2) => { c2.checked = false; });
+          segarkanPilihan(d.group);
+        },
+
         push: async (d, btn) => {
-          const ids = picked(root, 'app').map(Number);
+          const ids = picked('app').map(Number);
           if (!ids.length) return A.toast('Pilih karyawan di tabel kiri lebih dulu', 'warn');
           const ok = await A.confirm(`Kirim ${ids.length} karyawan ke ${device.name}?`, {
             title: 'Kirim ke Mesin',
@@ -263,7 +356,20 @@
           });
           if (!ok) return undefined;
           return A.busy(btn, async () => {
-            const res = await A.callSafe('device.pushEmployees', { id: deviceId, employeeIds: ids });
+            let res = await A.callSafe('device.pushEmployees', { id: deviceId, employeeIds: ids });
+            if (res && res.needsConfirm) {
+              const pilihan = await overwriteDialog(res, device);
+              if (pilihan === 'skip') {
+                res = await A.callSafe('device.pushEmployees', {
+                  id: deviceId, employeeIds: ids, skipPins: res.conflicts.map((k) => k.pin),
+                });
+              } else if (pilihan === 'overwrite') {
+                res = await A.callSafe('device.pushEmployees', { id: deviceId, employeeIds: ids, overwrite: true });
+              } else {
+                A.toast('Pengiriman dibatalkan. Tidak ada yang diubah di mesin.', 'warn');
+                return;
+              }
+            }
             if (res && res.error && !res.sent) A.toast(res.error, 'err', 8000);
             else if (res) {
               const gagal = res.failed ? res.failed.length : 0;
@@ -277,6 +383,7 @@
               const tolak = j.terkirim && j.bertambah === 0
                 ? ' — mesin menerima kiriman tetapi sidik jarinya tidak bertambah, firmware mesin ini kemungkinan menolak penulisan sidik jari'
                 : '';
+              pilih.app.clear();
               A.toast(
                 `${res.sent.length} karyawan terkirim${gagal ? `, ${gagal} gagal` : ''}${jari}${tolak}`,
                 gagal || tolak ? 'warn' : 'ok',
@@ -288,7 +395,7 @@
         },
 
         import: async (d, btn) => {
-          const pins = picked(root, 'device');
+          const pins = picked('device');
           if (!pins.length) return A.toast('Pilih user di tabel kanan lebih dulu', 'warn');
           const baru = data.device.filter((r) => pins.includes(r.pin) && !r.in_app);
           const sudahAda = pins.length - baru.length;
@@ -303,6 +410,7 @@
               })),
             });
             if (res) {
+              pilih.device.clear();
               A.toast(
                 `${res.created} karyawan ditambahkan${sudahAda ? `, ${sudahAda} dilewati karena sudah ada` : ''}`,
                 'ok'
@@ -313,7 +421,7 @@
         },
 
         adopt: async (d, btn) => {
-          const pins = picked(root, 'device').filter((p) => {
+          const pins = picked('device').filter((p) => {
             const row = data.device.find((r) => r.pin === p);
             return row && row.in_app && row.status !== 'sinkron';
           });
@@ -326,7 +434,10 @@
           if (!ok) return undefined;
           return A.busy(btn, async () => {
             const res = await A.callSafe('devices.adoptFromDevice', { deviceId, pins });
-            if (res) A.toast(`${res.updated} karyawan disamakan dengan mesin`, 'ok');
+            if (res) {
+              pilih.device.clear();
+              A.toast(`${res.updated} karyawan disamakan dengan mesin`, 'ok');
+            }
             await A.refresh();
           }, 'Menyamakan...');
         },
@@ -372,7 +483,7 @@
         },
 
         removeFromDevice: async (d, btn) => {
-          const pins = picked(root, 'device');
+          const pins = picked('device');
           if (!pins.length) return A.toast('Pilih user di tabel kanan lebih dulu', 'warn');
           const ok = await A.confirm(`Hapus ${pins.length} user dari ${device.name}?`, {
             okLabel: 'Hapus dari Mesin',
@@ -381,7 +492,10 @@
           if (!ok) return undefined;
           return A.busy(btn, async () => {
             const res = await A.callSafe('device.removeUsers', { id: deviceId, pins });
-            if (res && res.removed) A.toast(`${res.removed.length} user dihapus dari mesin`, 'ok');
+            if (res && res.removed) {
+              pilih.device.clear();
+              A.toast(`${res.removed.length} user dihapus dari mesin`, 'ok');
+            }
             await A.refresh();
           }, 'Menghapus...');
         },
@@ -397,12 +511,12 @@
     </select>`;
   }
 
-  function tabelAplikasi(rows, semua, device) {
+  function tabelAplikasi(hal, cocok, semua, device) {
     return `<div class="card" style="margin:0">
       <div class="card-head">
         <div>
           <h3>Karyawan di Aplikasi</h3>
-          <div class="sub">${semua.length} karyawan • menampilkan ${rows.length}</div>
+          <div class="sub">${semua.length} karyawan • ${cocok} cocok filter<span data-pick-info="app"></span></div>
         </div>
         <div class="pill-row">
           ${searchBox('qApp', state.appSearch)}
@@ -437,10 +551,11 @@
             },
             { label: 'Status', className: 'c', render: (r) => statusBadge(r.status, 'app') },
           ],
-          rows,
+          hal.rows,
           { empty: `Tidak ada karyawan yang cocok dengan filter.` }
         )}
       </div>
+      ${hal.controls}
       <div class="card-head" style="border-top:1px solid var(--border);border-bottom:0;display:block">
         <div class="small muted">Status dilihat dari sisi aplikasi terhadap ${A.esc(device.name)}</div>
         <div class="small muted" style="margin-top:3px">
@@ -458,12 +573,12 @@
 
   // ------------------------------------------------------------ tabel kanan
 
-  function tabelMesin(rows, semua, device) {
+  function tabelMesin(hal, cocok, semua, device) {
     return `<div class="card" style="margin:0">
       <div class="card-head">
         <div>
           <h3>Karyawan di Mesin</h3>
-          <div class="sub">${A.esc(device.name)} • ${semua.length} user • menampilkan ${rows.length}</div>
+          <div class="sub">${A.esc(device.name)} • ${semua.length} user • ${cocok} cocok filter<span data-pick-info="device"></span></div>
         </div>
         <div class="pill-row">
           ${searchBox('qDevice', state.deviceSearch)}
@@ -503,10 +618,11 @@
             },
             { label: 'Status', className: 'c', render: (r) => statusBadge(r.status, 'device') },
           ],
-          rows,
+          hal.rows,
           { empty: 'Belum ada data user dari mesin ini. Tekan "Baca Ulang dari Mesin".' }
         )}
       </div>
+      ${hal.controls}
       <div class="card-head" style="border-top:1px solid var(--border);border-bottom:0">
         <span class="small muted">Status dilihat dari sisi mesin terhadap data aplikasi</span>
       </div>

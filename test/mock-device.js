@@ -106,7 +106,9 @@ function dataBlock(records) {
 }
 
 class MockDevice {
-  constructor({ users = [], attendance = [], fingers = [], protocol = 'tcp', commKey = 0, port = 0, host = '127.0.0.1', replyDelay = 0 } = {}) {
+  constructor({ users = [], attendance = [], fingers = [], protocol = 'tcp', commKey = 0, port = 0, host = '127.0.0.1', replyDelay = 0, ignoreAcks = false } = {}) {
+    // Tiru firmware bandel yang tetap mengulang event walau sudah di-ACK.
+    this.ignoreAcks = ignoreAcks;
     // Jeda balasan buatan. Perangkat asli membalas dalam puluhan milidetik;
     // tanpa jeda, pengujian selesai terlalu cepat untuk menguji hal-hal yang
     // hanya tampak saat proses sedang berjalan, seperti bilah kemajuan.
@@ -128,6 +130,13 @@ class MockDevice {
     this.attBlock = dataBlock(attendance.map(attendanceRecord));
     this.pending = null; // blok yang sedang ditarik per potongan
     this.received = []; // riwayat perintah, untuk pemeriksaan di tes
+    // Event realtime: seperti mesin asli, event dikirim satu per satu dan
+    // DIULANG sampai klien membalas ACK yang dikenali. ACK yang tidak dikenali
+    // membuat scan yang sama terus berdatangan ke aplikasi.
+    this.liveQueue = [];
+    this.liveInFlight = null;
+    this.liveResends = 0; // jumlah pengiriman ulang, untuk pemeriksaan di tes
+    this.acks = []; // reply id tiap ACK yang diterima
     this.server = null;
     this.port = 0;
     this.sockets = new Set();
@@ -212,7 +221,15 @@ class MockDevice {
         break;
 
       case CMD.ACK_OK:
-        // ACK balik dari klien saat live capture — tidak perlu dijawab.
+        // ACK balik dari klien saat live capture — tidak dijawab. Hanya ACK
+        // dengan reply id seperti pyzk (USHRT_MAX - 1, tertulis 0) yang
+        // dianggap sah; selain itu event diulang.
+        this.acks.push(rid);
+        if (this.liveInFlight && rid === 0 && !this.ignoreAcks) {
+          clearTimeout(this.liveInFlight.timer);
+          this.liveInFlight = null;
+          this._sendNextLive();
+        }
         break;
 
       case CMD.VERSION:
@@ -411,10 +428,36 @@ class MockDevice {
       timestamp.getMinutes(),
       timestamp.getSeconds(),
     ]).copy(payload, 26);
-    this._reply(this._liveSend, CMD.REG_EVENT, payload, 0);
+    this.liveQueue.push(payload);
+    if (!this.liveInFlight) this._sendNextLive();
+  }
+
+  _sendNextLive() {
+    const payload = this.liveQueue.shift();
+    if (!payload || !this._liveSend) return;
+    const kirim = (sisa) => {
+      if (!this._liveSend) return;
+      this._reply(this._liveSend, CMD.REG_EVENT, payload, 0);
+      if (sisa <= 0) {
+        this.liveInFlight = null;
+        this._sendNextLive();
+        return;
+      }
+      this.liveInFlight = {
+        timer: setTimeout(() => {
+          this.liveResends += 1;
+          kirim(sisa - 1);
+        }, 60),
+      };
+    };
+    kirim(4);
   }
 
   close() {
+    if (this.liveInFlight) clearTimeout(this.liveInFlight.timer);
+    this.liveInFlight = null;
+    this.liveQueue = [];
+    this._liveSend = null;
     for (const s of this.sockets) s.destroy();
     return new Promise((resolve) => {
       if (!this.server) return resolve();

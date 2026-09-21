@@ -11,7 +11,7 @@ const path = require('node:path');
 const { app, BrowserWindow } = require('electron');
 
 const SHOT_DIR = path.join(__dirname, 'screenshots');
-const PAGES = ['dashboard', 'employees', 'shifts', 'schedules', 'devices', 'sync', 'logs', 'leaves', 'reports', 'settings'];
+const PAGES = ['dashboard', 'employees', 'shifts', 'schedules', 'devices', 'sync', 'logs', 'leaves', 'reports', 'settings', 'users'];
 
 const problems = [];
 
@@ -150,6 +150,48 @@ app.whenReady().then(async () => {
     await wait(1500);
   }
 
+  // ---- layar masuk: buat Admin pertama lewat form sungguhan
+  const shot = async (name) =>
+    fs.writeFileSync(path.join(SHOT_DIR, `${name}.png`), (await win.webContents.capturePage()).toPNG());
+  const js = (code) => win.webContents.executeJavaScript(code);
+  const HELPER = `
+    const tunggu = (ms) => new Promise((r) => setTimeout(r, ms));
+    const isi = (name, v) => { document.querySelector('#authScreen [name="' + name + '"]').value = v; };
+    const kirim = () => document.querySelector('#authScreen form button[type=submit]').click();
+    const terkunci = () => !document.getElementById('authScreen').hidden;`;
+  await wait(800);
+  await shot('login-1-buat-admin');
+  const langkah = async (nama, code) => {
+    const hasil = await js(`(async () => { ${HELPER} ${code} })()`);
+    const ok = hasil === 'ok';
+    if (!ok) problems.push(`${nama}: ${hasil}`);
+    console.log(`  ${ok ? '  OK ' : 'GAGAL'} │ ${nama}${ok ? '' : ` — ${hasil}`}`);
+  };
+  await langkah('login: form buat Admin pertama', `
+    if (!terkunci()) return 'aplikasi terbuka tanpa login';
+    if (!document.querySelector('#authScreen [name="fullName"]')) return 'form buat Admin tidak tampil';
+    isi('fullName', 'Admin Uji'); isi('username', 'admin'); isi('newPassword', 'rahasia-123'); isi('confirm', 'rahasia-123');
+    kirim(); await tunggu(1500);
+    return document.querySelector('#authScreen .recovery-code') ? 'ok' : 'kode pemulihan tidak tampil';`);
+  await shot('login-2-kode-pemulihan');
+  await langkah('login: konfirmasi kode pemulihan membuka aplikasi', `
+    document.querySelector('#authScreen input[type=checkbox]').checked = true;
+    kirim(); await tunggu(1500);
+    if (terkunci()) return 'masih terkunci';
+    return document.getElementById('userName').textContent === 'Admin Uji' ? 'ok' : 'nama pengguna tidak tampil';`);
+  await langkah('login: Keluar mengunci aplikasi', `
+    document.getElementById('btnLogout').click(); await tunggu(1200);
+    if (!terkunci()) return 'tidak terkunci';
+    return document.getElementById('content').innerHTML === '' ? 'ok' : 'data halaman masih ada di balik layar';`);
+  await shot('login-3-masuk');
+  await langkah('login: password salah ditolak', `
+    isi('username', 'admin'); isi('password', 'salah-sekali'); kirim(); await tunggu(1200);
+    const e = document.querySelector('#authScreen .auth-error');
+    return terkunci() && e && !e.hidden ? 'ok' : 'tidak ada pesan salah';`);
+  await langkah('login: password benar membuka aplikasi', `
+    isi('username', 'admin'); isi('password', 'rahasia-123'); kirim(); await tunggu(1500);
+    return terkunci() ? 'masih terkunci' : 'ok';`);
+
   for (const page of PAGES) {
     try {
       await win.webContents.executeJavaScript(`window.App.go(${JSON.stringify(page)})`);
@@ -186,7 +228,7 @@ app.whenReady().then(async () => {
         const teks = (id) => (document.getElementById(id) || {}).textContent || '';
         const lebar = () => (document.getElementById('progressFill') || {}).style.width || '';
 
-        const awalTersembunyi = panel().hidden;
+        const awalTersembunyi = panel().hidden && getComputedStyle(panel()).display === 'none';
         // Dijalankan tanpa ditunggu, supaya bisa diamati saat sedang berjalan.
         const janji = window.api.call('device.pushEmployees', { id: ${devLambat}, employeeIds: ${JSON.stringify(idsKirim)} });
 
@@ -249,7 +291,9 @@ app.whenReady().then(async () => {
         const semua = document.querySelector('#content .pick-all');
         if (!semua) return { galat: 'kotak pilih-semua tidak ada' };
 
-        const awalTersembunyi = bar().hidden;
+        // Yang diperiksa tampilan sebenarnya, bukan sekadar atribut: CSS bisa
+        // membuat elemen ber-atribut hidden tetap terlihat.
+        const awalTersembunyi = bar().hidden && getComputedStyle(bar()).display === 'none';
 
         semua.checked = true;
         semua.dispatchEvent(new Event('change', { bubbles: true }));
@@ -400,6 +444,92 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`window.App.closeModal(null)`);
   } catch (err) {
     problems.push(`uji tombol Ubah: ${err.message}`);
+  }
+
+  // Pagination: 60 karyawan tambahan supaya tabel Karyawan lebih dari satu halaman.
+  try {
+    for (let i = 1; i <= 60; i++) {
+      employees.create({ pin: `P${String(i).padStart(3, '0')}`, name: `Uji Halaman ${String(i).padStart(3, '0')}` });
+    }
+    await langkah('pagination: bawaan 10 baris per halaman dengan pager', `
+      window.App.go('employees'); await tunggu(900);
+      const baris = document.querySelectorAll('#content tbody tr').length;
+      const pager = document.querySelector('#content .pager');
+      if (!pager) return 'pager tidak tampil';
+      const pilihan = [...document.querySelectorAll('[data-pager-size] option')].map((o) => o.textContent).join(',');
+      if (pilihan !== '10,25,50,100,Semua') return 'pilihan ukuran: ' + pilihan;
+      return baris === 10 ? 'ok' : 'jumlah baris ' + baris;`);
+    await js(`document.getElementById('content').scrollTop = 1e6`);
+    await wait(200);
+    await shot('pagination-karyawan');
+    await langkah('pagination: Berikutnya & » terakhir membuka halaman yang benar', `
+      document.querySelector('[data-pager-go="next"]').click(); await tunggu(900);
+      const teks2 = document.querySelector('.pager-page').textContent;
+      if (!teks2.includes('Halaman 2 dari 7')) return teks2;
+      document.querySelector('[data-pager-go="last"]').click(); await tunggu(900);
+      const teks = document.querySelector('.pager-page').textContent;
+      const baris = document.querySelectorAll('#content tbody tr').length;
+      return teks.includes('Halaman 7 dari 7') && baris === 5 ? 'ok' : teks + ' / ' + baris + ' baris';`);
+    await langkah('pagination: pilihan bertahan saat pindah halaman', `
+      const semua = document.querySelector('#content .pick-all');
+      semua.checked = true; semua.dispatchEvent(new Event('change'));
+      document.querySelector('[data-pager-go="prev"]').click(); await tunggu(900);
+      const n = Number(document.getElementById('bulkCount').textContent);
+      const dicentangDiSini = [...document.querySelectorAll('#content .pick')].filter((c) => c.checked).length;
+      return n === 5 && dicentangDiSini === 0 ? 'ok' : 'terpilih ' + n + ', tercentang di halaman 6: ' + dicentangDiSini;`);
+    await langkah('pagination: "pilih semua hasil filter" memilih seluruh 65 karyawan', `
+      document.querySelector('[data-act="bulkClear"]').click(); await tunggu(100);
+      const semua = document.querySelector('#content .pick-all');
+      semua.checked = true; semua.dispatchEvent(new Event('change'));
+      const tautan = document.querySelector('[data-act="pickAll"]');
+      if (!tautan) return 'tautan pilih semua tidak muncul';
+      tautan.click(); await tunggu(200);
+      const n = Number(document.getElementById('bulkCount').textContent);
+      document.querySelector('[data-act="bulkClear"]').click();
+      return n === 65 ? 'ok' : 'terpilih ' + n;`);
+    await langkah('pagination: ukuran "Semua" menampilkan seluruh baris', `
+      const sel = document.querySelector('[data-pager-size]');
+      sel.value = '0'; sel.dispatchEvent(new Event('change', { bubbles: true })); await tunggu(900);
+      const baris = document.querySelectorAll('#content tbody tr').length;
+      return baris === 65 ? 'ok' : 'jumlah baris ' + baris;`);
+    await langkah('pagination: pencarian kembali ke halaman 1', `
+      const sel = document.querySelector('[data-pager-size]');
+      sel.value = '25'; sel.dispatchEvent(new Event('change', { bubbles: true })); await tunggu(900);
+      document.querySelector('[data-pager-go="last"]').click(); await tunggu(900);
+      const q = document.getElementById('q');
+      q.value = 'Uji Halaman'; q.dispatchEvent(new Event('input')); await tunggu(1300);
+      const teks = document.querySelector('.pager-page').textContent;
+      return teks.includes('Halaman 1 dari 3') ? 'ok' : teks;`);
+  } catch (err) {
+    problems.push(`uji pagination: ${err.message}`);
+  }
+
+  // PIN otomatis & peringatan PIN yang sudah dipakai orang lain di mesin.
+  try {
+    const gudang = devices.list().find((d) => d.name === 'Mesin Gudang');
+    devices.saveUsers(gudang.id, [{ uid: 5, userId: '7001', name: 'Orang Mesin', privilege: 0, card: 0 }]);
+    const usulan = employees.nextPin();
+    await langkah('PIN otomatis terisi di form Tambah Karyawan', `
+      window.App.go('employees'); await tunggu(900);
+      document.getElementById('btnAdd').click(); await tunggu(900);
+      const pin = document.getElementById('f_pin').value;
+      return pin === ${JSON.stringify(usulan)} ? 'ok' : 'PIN terisi ' + pin + ', harap ${usulan}';`);
+    await langkah('PIN yang dipakai orang lain di mesin memunculkan peringatan', `
+      document.getElementById('f_pin').value = '7001';
+      document.getElementById('f_name').value = 'Karyawan Baru';
+      document.querySelector('#modal [data-ok]').click(); await tunggu(1200);
+      const judul = document.querySelector('#modal h3').textContent;
+      if (!judul.includes('Sudah Dipakai')) return 'judul dialog: ' + judul;
+      return document.querySelector('#modal').textContent.includes('Orang Mesin') ? 'ok' : 'nama orang di mesin tidak disebut';`);
+    await shot('pin-bentrok');
+    await langkah('pilihan "Pakai PIN Kosong" kembali ke form dengan PIN baru', `
+      document.querySelector('[data-choice="other"]').click(); await tunggu(1200);
+      const pin = document.getElementById('f_pin').value;
+      const nama = document.getElementById('f_name').value;
+      window.App.closeModal(null);
+      return pin === ${JSON.stringify(usulan)} && nama === 'Karyawan Baru' ? 'ok' : 'PIN ' + pin + ', nama ' + nama;`);
+  } catch (err) {
+    problems.push(`uji PIN: ${err.message}`);
   }
 
   console.log('');

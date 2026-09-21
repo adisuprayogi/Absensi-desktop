@@ -189,3 +189,36 @@ CREATE TABLE IF NOT EXISTS sync_history (
   ok         INTEGER DEFAULT 0,
   message    TEXT
 );
+
+-- Pengguna APLIKASI (bukan user mesin absensi). Password disimpan sebagai
+-- hash scrypt, tidak pernah teks aslinya.
+CREATE TABLE IF NOT EXISTS app_users (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  username             TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  full_name            TEXT NOT NULL,
+  role                 TEXT NOT NULL DEFAULT 'operator',  -- admin | operator
+  password_hash        TEXT NOT NULL,
+  active               INTEGER NOT NULL DEFAULT 1,
+  must_change_password INTEGER NOT NULL DEFAULT 0,       -- 1 = wajib ganti saat masuk
+  last_login_at        TEXT,
+  created_at           TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- Rahasia autentikasi (mis. hash kode pemulihan). Sengaja terpisah dari
+-- `settings`, yang isinya dikirim utuh ke halaman aplikasi.
+CREATE TABLE IF NOT EXISTS auth_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT
+);
+
+-- Catatan aktivitas penting. Tanpa foreign key ke app_users supaya riwayat
+-- tetap utuh meski penggunanya dinonaktifkan atau namanya diubah.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  at        TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  user_id   INTEGER,
+  username  TEXT,
+  action    TEXT NOT NULL,
+  detail    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);

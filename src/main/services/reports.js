@@ -48,7 +48,15 @@ function shiftBounds(shift) {
  * sendiri, KECUALI hari sebelumnya berjadwal shift lintas hari yang jendela
  * kerjanya masih mencakup scan itu (kasus shift malam pulang dini hari).
  */
-function computeRange({ from, to, employeeIds = null, departmentId = null, search = '', includeInactive = false }) {
+function computeRange({
+  from,
+  to,
+  employeeIds = null,
+  departmentId = null,
+  search = '',
+  includeInactive = false,
+  now = new Date(),
+}) {
   const database = db.get();
   const beforeWindow = settingNumber('window_before_hours', 6) * 60;
   const afterWindow = settingNumber('window_after_hours', 6) * 60;
@@ -134,6 +142,19 @@ function computeRange({ from, to, employeeIds = null, departmentId = null, searc
         const offsetFromPrev = minutesOfDay + 1440;
         if (offsetFromPrev >= b.start - beforeWindow && offsetFromPrev <= b.end + afterWindow) {
           targetDate = prevDate;
+
+          // Jendela shift kemarin bisa bertumpuk dengan shift hari ini (mis.
+          // Malam lalu Pagi): scan 07:55 adalah masuk Pagi, bukan pulang Malam.
+          // Bila keduanya mungkin, pilih yang batasnya paling dekat.
+          const ownShift = shiftMap.get(`${log.employee_id}|${ownDate}`);
+          if (ownShift && !ownShift.is_off) {
+            const c = shiftBounds(ownShift);
+            if (minutesOfDay >= c.start - beforeWindow && minutesOfDay <= c.end + afterWindow) {
+              const jarakKePulangKemarin = Math.abs(offsetFromPrev - b.end);
+              const jarakKeMasukHariIni = Math.abs(minutesOfDay - c.start);
+              if (jarakKeMasukHariIni < jarakKePulangKemarin) targetDate = ownDate;
+            }
+          }
         }
       }
     }
@@ -145,7 +166,8 @@ function computeRange({ from, to, employeeIds = null, departmentId = null, searc
   }
 
   // ---- susun baris rekap
-  const today = todayStr();
+  const today = toDateStr(now);
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const dates = dateRange(from, to);
   const rows = [];
 
@@ -249,6 +271,9 @@ function computeRange({ from, to, employeeIds = null, departmentId = null, searc
         setStatus(row, STATUS.TIDAK_LENGKAP);
       } else if (date > today) {
         setStatus(row, STATUS.BELUM);
+      } else if (date === today && !leave && nowMinutes < shiftBounds(shift).end) {
+        // Shift hari ini belum selesai: belum scan bukan berarti alpha.
+        setStatus(row, STATUS.BELUM);
       } else if (leave) {
         row.status = leave.code;
         row.status_label = leave.name;
@@ -262,6 +287,18 @@ function computeRange({ from, to, employeeIds = null, departmentId = null, searc
   }
 
   return { dates, rows, employees };
+}
+
+/** Batas rentang rekap: cukup untuk setahun penuh, mencegah hitungan kebablasan. */
+const MAX_RANGE_DAYS = 366;
+
+function checkRange(from, to) {
+  const valid = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+  if (!valid(from) || !valid(to)) throw new Error('Isi tanggal awal dan akhir periode rekap.');
+  if (from > to) throw new Error('Tanggal awal tidak boleh setelah tanggal akhir.');
+  if (dateRange(from, to).length > MAX_RANGE_DAYS) {
+    throw new Error(`Rentang rekap maksimal ${MAX_RANGE_DAYS} hari.`);
+  }
 }
 
 function setStatus(row, s) {
@@ -358,8 +395,9 @@ const reports = {
     return { month, start, end, dates, rows, summary: summarize(rows) };
   },
 
-  /** Rekap rentang tanggal bebas. */
+  /** Rekap rentang tanggal bebas, mis. periode gaji 21 Agustus - 20 September. */
   range({ from, to, departmentId = null, search = '', employeeIds = null }) {
+    checkRange(from, to);
     const { rows, dates } = computeRange({ from, to, departmentId, search, employeeIds });
     return { from, to, dates, rows, summary: summarize(rows) };
   },

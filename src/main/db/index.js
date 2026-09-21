@@ -23,6 +23,7 @@ const DEFAULT_SETTINGS = {
   report_footer: '',
   report_signer: '',
   report_signer_title: 'HRD',
+  auto_lock_minutes: '15', // kunci aplikasi setelah tidak dipakai; 0 = tidak pernah
 };
 
 function seed(database) {
