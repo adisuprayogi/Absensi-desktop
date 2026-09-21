@@ -1,0 +1,37 @@
+appId: id.co.absensi.karyawan
+productName: Absensi Karyawan
+copyright: Copyright © 2026 Adi Mulya Suprayogi
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - build/icon.ico
+  - package.json
+  - '!**/*.map'
+  - '!**/{.eslintrc,.editorconfig,.gitignore}'
+
+# Binding native better-sqlite3 harus di luar asar agar bisa dimuat.
+asarUnpack:
+  - '**/*.node'
+
+win:
+  # Windows 10 ke atas, 64-bit.
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: Absensi-Karyawan-Setup-${version}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Absensi Karyawan
+  deleteAppDataOnUninstall: false
+  artifactName: Absensi-Karyawan-Setup-${version}.${ext}

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';" />
+  <title>Absensi Karyawan</title>
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">A</div>
+        <div class="brand-text">
+          <strong>Absensi</strong>
+          <span id="brandCompany">Karyawan</span>
+        </div>
+      </div>
+
+      <nav class="nav" id="nav">
+        <button class="nav-item" data-page="dashboard"><span class="ic">▤</span> Dashboard</button>
+        <div class="nav-group">Data Master</div>
+        <button class="nav-item" data-page="employees"><span class="ic">☺</span> Karyawan</button>
+        <button class="nav-item" data-page="shifts"><span class="ic">◷</span> Shift Kerja</button>
+        <button class="nav-item" data-page="schedules"><span class="ic">▦</span> Jadwal Shift</button>
+        <div class="nav-group">Absensi</div>
+        <button class="nav-item" data-page="devices"><span class="ic">⌗</span> Mesin Absensi</button>
+        <button class="nav-item" data-page="sync"><span class="ic">⇄</span> Sinkron Karyawan</button>
+        <button class="nav-item" data-page="logs"><span class="ic">≡</span> Log Scan</button>
+        <button class="nav-item" data-page="leaves"><span class="ic">✎</span> Izin &amp; Cuti</button>
+        <div class="nav-group">Laporan</div>
+        <button class="nav-item" data-page="reports"><span class="ic">▩</span> Rekap Absensi</button>
+        <div class="nav-group">Sistem</div>
+        <button class="nav-item" data-page="settings"><span class="ic">⚙</span> Pengaturan</button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <div class="live-dot" id="liveIndicator" title="Status koneksi realtime">
+          <span class="dot"></span><span id="liveText">Realtime nonaktif</span>
+        </div>
+        <div class="version" id="appVersion"></div>
+        <div class="version" id="appCopyright"></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="pageTitle">Dashboard</h1>
+          <p id="pageSubtitle" class="muted"></p>
+        </div>
+        <div class="topbar-actions" id="topbarActions"></div>
+      </header>
+      <section class="content" id="content"></section>
+    </main>
+  </div>
+
+  <div id="progressPanel" class="progress-panel" hidden>
+    <div class="progress-head">
+      <strong id="progressTitle"></strong>
+      <span id="progressCount" class="num"></span>
+    </div>
+    <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    <div id="progressPhase" class="progress-phase"></div>
+    <div id="progressLabel" class="progress-label"></div>
+  </div>
+  <div class="toast-wrap" id="toasts"></div>
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <div class="modal" id="modal" role="dialog" aria-modal="true"></div>
+  </div>
+
+  <script src="js/core.js"></script>
+  <script src="js/pages/dashboard.js"></script>
+  <script src="js/pages/employees.js"></script>
+  <script src="js/pages/shifts.js"></script>
+  <script src="js/pages/schedules.js"></script>
+  <script src="js/pages/devices.js"></script>
+  <script src="js/pages/sync.js"></script>
+  <script src="js/pages/logs.js"></script>
+  <script src="js/pages/leaves.js"></script>
+  <script src="js/pages/reports.js"></script>
+  <script src="js/pages/settings.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

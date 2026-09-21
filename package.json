@@ -1,0 +1,32 @@
+{
+  "name": "absensi-karyawan",
+  "productName": "Absensi Karyawan",
+  "version": "1.0.0",
+  "description": "Aplikasi manajemen absensi karyawan, shift, dan rekap dengan mesin fingerprint Solution X105/X401 via LAN",
+  "main": "src/main/main.js",
+  "author": {
+    "name": "Adi Mulya Suprayogi",
+    "email": "suprayogi@tazkia.ac.id"
+  },
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "test": "node test/zk-protocol.js && electron test/smoke.js",
+    "test:protocol": "node test/zk-protocol.js",
+    "test:app": "electron test/smoke.js",
+    "test:ui": "electron test/ui.js",
+    "icon": "node build/make-icon.js",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --win --dir",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "electron": "^38.1.2",
+    "electron-builder": "^25.1.8"
+  }
+}
