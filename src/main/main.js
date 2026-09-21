@@ -120,7 +120,8 @@ function buildMenu() {
                 'Manajemen absensi, shift, dan rekap karyawan.\n' +
                 'Mendukung mesin fingerprint Solution X105 / X401 (protokol ZKTeco) melalui jaringan LAN.\n\n' +
                 `${COPYRIGHT}\n\n` +
-                `Database: ${db.getPath()}`,
+                `Database: ${db.getPath()}\n` +
+                `Skema database: v${db.schemaInfo().version}`,
             });
           },
         },
@@ -135,10 +136,23 @@ app.whenReady().then(async () => {
     db.init(app.getPath('userData'));
     // Catatan "pulihkan backup" yang dititipkan sebelum aplikasi dibuka ulang.
     require('./services/audit').audit.flushPending();
+    const info = db.schemaInfo().lastMigration;
+    if (info && info.backup) {
+      console.log(`[database] diperbarui dari skema v${info.from} ke v${info.to}; salinan sebelumnya: ${info.backup}`);
+    }
   } catch (err) {
+    const { DatabaseVersionError, MigrationError } = require('./db/migrations');
+    const judul =
+      err instanceof DatabaseVersionError
+        ? 'Versi aplikasi terlalu lama'
+        : err instanceof MigrationError
+          ? 'Pembaruan database gagal'
+          : 'Gagal membuka database';
     dialog.showErrorBox(
-      'Gagal membuka database',
-      `Aplikasi tidak dapat membuka berkas database.\n\n${err.message}`
+      judul,
+      err instanceof DatabaseVersionError || err instanceof MigrationError
+        ? err.message
+        : `Aplikasi tidak dapat membuka berkas database.\n\n${err.message}`
     );
     app.exit(1);
     return;

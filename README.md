@@ -69,7 +69,7 @@ bawaan mesin.
 
 ## Instalasi
 
-1. Jalankan `Absensi-Karyawan-Setup-1.0.0.exe`
+1. Jalankan `Absensi-Karyawan-Setup-1.1.0.exe`
 2. Pilih folder instalasi, lalu tunggu sampai selesai
 3. Jalankan aplikasi dari Start Menu atau ikon di desktop
 
@@ -400,6 +400,30 @@ berkas `sebelum-pulih-...` untuk kembali ke keadaan sebelumnya.
 
 Menghapus aplikasi (uninstall) **tidak** menghapus database maupun backup.
 
+### Memperbarui ke versi baru
+
+Jalankan installer versi baru di atas versi lama. Tidak perlu uninstall dulu.
+Data **tidak** dihapus, karena database disimpan terpisah dari folder
+program.
+
+Saat versi baru pertama kali dibuka, aplikasi memperbarui struktur database
+sendiri:
+
+1. Database disalin utuh dulu ke folder backup dengan nama
+   `sebelum-upgrade-v…-ke-v…-<tanggal>.db`. Salinan ini tidak pernah dihapus
+   otomatis.
+2. Setiap langkah pembaruan dijalankan satu per satu. Bila satu langkah gagal,
+   langkah itu dibatalkan seluruhnya, data tetap utuh, dan aplikasi
+   menampilkan lokasi salinannya.
+
+Versi aplikasi yang lebih lama menolak membuka database dari versi yang lebih
+baru, begitu juga saat memulihkan backupnya, supaya data tidak rusak. Nomor
+skema database terlihat di **Bantuan → Tentang Aplikasi**.
+
+Ingin mulai dari database kosong di komputer yang pernah memakai aplikasi ini?
+Tutup aplikasi, lalu ganti nama folder `%APPDATA%\Absensi Karyawan`
+(mis. menjadi `Absensi Karyawan - lama`) sebelum membukanya lagi.
+
 ---
 
 ## Untuk Pengembang
@@ -435,6 +459,26 @@ Tanpa komputer Windows, pakai GitHub Actions
   Samakan dulu `version` di `package.json` dengan tag-nya, karena nama berkas
   installer diambil dari situ.
 
+### Mengubah struktur database
+
+`schema.sql` selalu berisi skema **terbaru** dan dipakai untuk database baru.
+Database pengguna yang sudah ada diperbarui lewat langkah bernomor di
+`src/main/db/migrations.js`. Nomor skemanya disimpan di dalam database
+(`PRAGMA user_version`).
+
+Setiap kali struktur berubah (tabel, kolom, index, atau relasi):
+
+1. Ubah `schema.sql`.
+2. Tambahkan langkah dengan nomor berikutnya di `MIGRATIONS`. Jangan
+   mengubah langkah yang sudah dirilis.
+3. Untuk mengubah relasi, tipe, atau aturan kolom, pakai `rebuildTable` dan
+   tandai langkahnya `rebuild: true`.
+4. Naikkan `version` di `package.json`.
+
+`npm test` menguji upgrade dari database lama, penolakan database yang lebih
+baru, pembatalan langkah yang gagal, dan pembangunan ulang tabel tanpa
+kehilangan data anak.
+
 ### Struktur
 
 ```
@@ -444,7 +488,7 @@ src/main/            proses utama Electron
     packet.js        checksum, framing, encoding waktu, comm key
     client.js        klien TCP/UDP: connect, tarik data, live capture
     manager.js       orkestrasi banyak mesin, auto-sync, sambung ulang
-  db/                skema SQLite dan inisialisasi
+  db/                skema SQLite, inisialisasi, dan migrasi bernomor
   services/          logika bisnis (karyawan, shift, jadwal, rekap, ekspor)
   ipc.js             daftar fungsi yang boleh dipanggil dari halaman
 src/renderer/        antarmuka (HTML/CSS/JS biasa, tanpa proses build)

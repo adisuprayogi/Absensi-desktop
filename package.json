@@ -1,7 +1,7 @@
 {
   "name": "absensi-karyawan",
   "productName": "Absensi Karyawan",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Aplikasi manajemen absensi karyawan, shift, dan rekap dengan mesin fingerprint Solution X105/X401 via LAN",
   "main": "src/main/main.js",
   "author": {

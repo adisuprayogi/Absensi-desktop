@@ -1,5 +1,7 @@
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
+-- Skema TERBARU, dipakai untuk database baru dan oleh migrasi v1.
+-- journal_mode & foreign_keys diatur di db/index.js: PRAGMA tidak boleh
+-- dijalankan di dalam transaksi migrasi. Perubahan struktur berikutnya juga
+-- WAJIB ditambahkan sebagai langkah bernomor di migrations.js.
 
 CREATE TABLE IF NOT EXISTS departments (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,

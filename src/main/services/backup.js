@@ -5,6 +5,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 
 const db = require('../db');
+const { LATEST } = require('../db/migrations');
 const { settings } = require('./masters');
 
 /** Tabel yang wajib ada agar sebuah berkas diakui sebagai database aplikasi ini. */
@@ -13,6 +14,8 @@ const REQUIRED_TABLES = ['employees', 'shifts', 'attendance_logs', 'settings'];
 const PREFIX_AUTO = 'otomatis';
 const PREFIX_MANUAL = 'manual';
 const PREFIX_SAFETY = 'sebelum-pulih';
+// Dibuat otomatis tepat sebelum database diperbarui ke skema versi baru.
+const PREFIX_UPGRADE = 'sebelum-upgrade';
 
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -77,6 +80,16 @@ function inspect(filePath) {
     const tables = new Set(
       probe.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name)
     );
+    // Backup dari versi aplikasi yang lebih baru tidak bisa dipakai di sini:
+    // setelah dipulihkan, aplikasi ini akan menolak membukanya.
+    const skema = probe.pragma('user_version', { simple: true });
+    if (skema > LATEST) {
+      return {
+        ok: false,
+        error: `Backup ini dibuat oleh versi aplikasi yang lebih baru (skema v${skema}; aplikasi ini sampai v${LATEST}). Perbarui aplikasi dulu sebelum memulihkannya.`,
+      };
+    }
+
     const hilang = REQUIRED_TABLES.filter((t) => !tables.has(t));
     if (hilang.length) {
       return {
@@ -104,6 +117,7 @@ function inspect(filePath) {
       employees: hitung('SELECT COUNT(*) FROM employees'),
       logs: hitung('SELECT COUNT(*) FROM attendance_logs'),
       devices: hitung('SELECT COUNT(*) FROM devices'),
+      schemaVersion: skema,
       firstLog: hitung('SELECT MIN(ts) FROM attendance_logs', null),
       lastLog: hitung('SELECT MAX(ts) FROM attendance_logs', null),
       company: (() => {
@@ -131,7 +145,7 @@ function inspect(filePath) {
 /** Jenis backup dibaca dari awalan nama berkasnya. */
 function kindOf(name) {
   if (name.startsWith(PREFIX_AUTO)) return 'otomatis';
-  if (name.startsWith(PREFIX_SAFETY)) return 'pengaman';
+  if (name.startsWith(PREFIX_SAFETY) || name.startsWith(PREFIX_UPGRADE)) return 'pengaman';
   return 'manual';
 }
 

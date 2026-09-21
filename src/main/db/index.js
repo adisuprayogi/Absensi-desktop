@@ -3,10 +3,12 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const { migrate, LATEST } = require('./migrations');
 
 let db = null;
 let dbPath = null;
 let userDataDir = null;
+let lastMigration = null;
 
 const DEFAULT_SETTINGS = {
   company_name: 'Nama Perusahaan',
@@ -84,37 +86,6 @@ function seed(database) {
   tx();
 }
 
-/**
- * Kolom yang ditambahkan setelah versi pertama dirilis.
- *
- * schema.sql memakai CREATE TABLE IF NOT EXISTS, jadi tabel yang sudah ada di
- * database lama tidak ikut berubah. Kolom baru harus ditambahkan di sini agar
- * pengguna yang sudah memakai aplikasi tidak kehilangan datanya saat upgrade.
- */
-const MIGRATIONS = [
-  ['employees', 'card', 'INTEGER NOT NULL DEFAULT 0'],
-  ['employees', 'privilege', 'INTEGER NOT NULL DEFAULT 0'],
-  ['employees', 'device_password', 'TEXT'],
-  ['device_users', 'finger_count', 'INTEGER DEFAULT 0'],
-  ['device_users', 'base_name', 'TEXT'],
-  ['device_users', 'base_card', 'INTEGER'],
-  ['device_users', 'base_privilege', 'INTEGER'],
-  ['device_users', 'base_at', 'TEXT'],
-  ['device_users', 'password', 'TEXT'],
-  ['devices', 'fp_support', 'INTEGER'],
-];
-
-function migrate(database) {
-  for (const [table, column, definition] of MIGRATIONS) {
-    const exists = database
-      .prepare(`SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?`)
-      .get(table, column).n;
-    if (!exists) {
-      database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-    }
-  }
-}
-
 function init(baseDir) {
   if (db) return db;
   userDataDir = baseDir;
@@ -126,11 +97,44 @@ function init(baseDir) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
 
-  const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
-  db.exec(schema);
-  migrate(db);
-  seed(db);
+  try {
+    lastMigration = migrate(db, {
+      schemaSql: fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8'),
+      backupDir: backupDirFor(db),
+    });
+    seed(db);
+  } catch (err) {
+    // Database dibiarkan tertutup dan tidak tersentuh; aplikasi menampilkan pesannya.
+    db.close();
+    db = null;
+    throw err;
+  }
   return db;
+}
+
+/**
+ * Folder salinan sebelum upgrade: folder backup pilihan pengguna bila masih
+ * bisa dijangkau (mis. flashdisk masih terpasang), selain itu folder bawaan.
+ */
+function backupDirFor(database) {
+  const bawaan = path.join(userDataDir, 'backups');
+  try {
+    const row = database.prepare("SELECT value FROM settings WHERE key = 'backup_folder'").get();
+    const pilihan = row && row.value ? row.value.trim() : '';
+    if (pilihan && fs.existsSync(pilihan)) return pilihan;
+  } catch {
+    /* tabel settings belum ada (database sangat lama) */
+  }
+  return bawaan;
+}
+
+/** Nomor skema database yang sedang dibuka, dan hasil migrasi saat dibuka. */
+function schemaInfo() {
+  return {
+    version: db ? db.pragma('user_version', { simple: true }) : null,
+    latest: LATEST,
+    lastMigration,
+  };
 }
 
 function get() {
@@ -168,4 +172,4 @@ function backupTo(targetPath) {
   return get().backup(targetPath);
 }
 
-module.exports = { init, get, getPath, getUserDataDir, sidecarFiles, close, backupTo };
+module.exports = { init, get, getPath, getUserDataDir, sidecarFiles, close, backupTo, schemaInfo };

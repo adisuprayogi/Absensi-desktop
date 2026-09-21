@@ -1145,8 +1145,102 @@ async function run() {
     1
   );
 
+  // ---- migrasi bernomor (PRAGMA user_version)
+  const migrasi = require('../src/main/db/migrations');
+  const skemaSql = fs.readFileSync(path.join(__dirname, '../src/main/db/schema.sql'), 'utf8');
+  eq('migrasi: database lama naik ke skema terbaru', db.get().pragma('user_version', { simple: true }), migrasi.LATEST);
+  check('migrasi: tabel login ikut dibuat di database lama',
+    !!db.get().prepare("SELECT 1 FROM sqlite_master WHERE name = 'app_users'").get());
+  const salinanUpgrade = fs.readdirSync(path.join(oldDir, 'backups')).filter((n) => n.startsWith('sebelum-upgrade-v0-ke-v'));
+  eq('migrasi: salinan dibuat sebelum upgrade (sekali saja)', salinanUpgrade.length, 1);
+  const isiSalinan = new Database(path.join(oldDir, 'backups', salinanUpgrade[0]), { readonly: true });
+  eq('migrasi: salinan berisi data SEBELUM upgrade',
+    isiSalinan.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('employees') WHERE name = 'card'").get().n, 0);
+  isiSalinan.close();
+  const diDaftar = backupSvc.list().items.find((i) => i.name === salinanUpgrade[0]);
+  eq('migrasi: salinan upgrade tergolong salinan pengaman (tidak dibuang otomatis)', diDaftar && diDaftar.kind, 'pengaman');
   db.close();
-  fs.rmSync(oldDir, { recursive: true, force: true });
+
+  // Database baru: langsung skema terbaru, tanpa salinan upgrade.
+  const baruDir = fs.mkdtempSync(path.join(os.tmpdir(), 'absensi-baru-'));
+  db.init(baruDir);
+  eq('migrasi: database baru langsung skema terbaru', db.get().pragma('user_version', { simple: true }), migrasi.LATEST);
+  check('migrasi: database baru tidak membuat salinan upgrade', !fs.existsSync(path.join(baruDir, 'backups')));
+  db.close();
+
+  // Database dari versi aplikasi yang lebih baru: ditolak tanpa diubah.
+  const masaDepanDir = fs.mkdtempSync(path.join(os.tmpdir(), 'absensi-baru-'));
+  fs.mkdirSync(path.join(masaDepanDir, 'data'));
+  const masaDepan = new Database(path.join(masaDepanDir, 'data', 'absensi.db'));
+  masaDepan.exec(skemaSql);
+  masaDepan.pragma(`user_version = ${migrasi.LATEST + 5}`);
+  masaDepan.close();
+  let ditolak = null;
+  try {
+    db.init(masaDepanDir);
+  } catch (err) {
+    ditolak = err;
+  }
+  check('migrasi: database versi lebih baru ditolak', ditolak instanceof migrasi.DatabaseVersionError, ditolak && ditolak.message);
+  const cekMasaDepan = new Database(path.join(masaDepanDir, 'data', 'absensi.db'), { readonly: true });
+  eq('migrasi: database versi lebih baru tidak diubah', cekMasaDepan.pragma('user_version', { simple: true }), migrasi.LATEST + 5);
+  cekMasaDepan.close();
+  const inspeksi = require('../src/main/services/backup').inspect(path.join(masaDepanDir, 'data', 'absensi.db'));
+  check('migrasi: backup dari versi lebih baru ditolak saat akan dipulihkan', !inspeksi.ok && /lebih baru/.test(inspeksi.error), inspeksi.error);
+
+  // Membangun ulang tabel (perubahan relasi/tipe) tanpa kehilangan data anak.
+  const ujiDir = fs.mkdtempSync(path.join(os.tmpdir(), 'absensi-uji-'));
+  const uji = new Database(path.join(ujiDir, 'uji.db'));
+  uji.pragma('foreign_keys = ON');
+  migrasi.migrate(uji, { schemaSql: skemaSql, backupDir: path.join(ujiDir, 'backups') });
+  const empUji = uji.prepare("INSERT INTO employees (pin, name) VALUES ('5', 'Relasi Uji')").run().lastInsertRowid;
+  const shiftUji = uji.prepare("INSERT INTO shifts (code, name) VALUES ('X', 'Uji')").run().lastInsertRowid;
+  uji.prepare("INSERT INTO schedules (employee_id, work_date, shift_id) VALUES (?, '2026-09-01', ?)").run(empUji, shiftUji);
+  uji.prepare("INSERT INTO attendance_logs (user_pin, employee_id, ts, log_date) VALUES ('5', ?, '2026-09-01 08:00:00', '2026-09-01')").run(empUji);
+
+  const langkahRebuild = {
+    version: migrasi.LATEST + 1,
+    name: 'uji bangun ulang tabel karyawan',
+    rebuild: true,
+    up(d, { rebuildTable }) {
+      const sqlLama = d.prepare("SELECT sql FROM sqlite_master WHERE name = 'employees'").get().sql;
+      rebuildTable('employees', (nama) =>
+        sqlLama.replace(/CREATE TABLE\s+\w+/, `CREATE TABLE ${nama}`).replace(/\)\s*$/, ', catatan_baru TEXT)'));
+    },
+  };
+  const hasilRebuild = migrasi.migrate(uji, { schemaSql: skemaSql, backupDir: path.join(ujiDir, 'backups'), migrations: [...migrasi.MIGRATIONS, langkahRebuild] });
+  eq('bangun ulang tabel: skema naik', uji.pragma('user_version', { simple: true }), migrasi.LATEST + 1);
+  check('bangun ulang tabel: salinan sebelum upgrade dibuat', !!hasilRebuild.backup && fs.existsSync(hasilRebuild.backup));
+  check('bangun ulang tabel: kolom baru ada', uji.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('employees') WHERE name = 'catatan_baru'").get().n === 1);
+  eq('bangun ulang tabel: data karyawan utuh', uji.prepare('SELECT name FROM employees WHERE id = ?').get(empUji).name, 'Relasi Uji');
+  eq('bangun ulang tabel: jadwal (ON DELETE CASCADE) tidak ikut terhapus', uji.prepare('SELECT COUNT(*) AS n FROM schedules').get().n, 1);
+  eq('bangun ulang tabel: log absensi tetap terpaut', uji.prepare('SELECT employee_id FROM attendance_logs').get().employee_id, empUji);
+  check('bangun ulang tabel: index dibuat ulang', !!uji.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_employees_active'").get());
+  eq('bangun ulang tabel: foreign key kembali aktif', uji.pragma('foreign_keys', { simple: true }), 1);
+
+  // Langkah yang gagal di tengah jalan dibatalkan seluruhnya.
+  const langkahGagal = {
+    version: migrasi.LATEST + 2,
+    name: 'uji gagal',
+    up(d) {
+      d.exec('ALTER TABLE employees ADD COLUMN setengah_jalan TEXT');
+      throw new Error('sengaja digagalkan');
+    },
+  };
+  let gagalMigrasi = null;
+  try {
+    migrasi.migrate(uji, { schemaSql: skemaSql, backupDir: path.join(ujiDir, 'backups'), migrations: [...migrasi.MIGRATIONS, langkahRebuild, langkahGagal] });
+  } catch (err) {
+    gagalMigrasi = err;
+  }
+  check('migrasi gagal: dilaporkan dengan jelas', gagalMigrasi instanceof migrasi.MigrationError && /sengaja/.test(gagalMigrasi.message));
+  check('migrasi gagal: pesan menyebut lokasi salinan', gagalMigrasi && /sebelum-upgrade/.test(gagalMigrasi.message));
+  eq('migrasi gagal: perubahan setengah jalan dibatalkan',
+    uji.prepare("SELECT COUNT(*) AS n FROM pragma_table_info('employees') WHERE name = 'setengah_jalan'").get().n, 0);
+  eq('migrasi gagal: nomor skema tidak naik', uji.pragma('user_version', { simple: true }), migrasi.LATEST + 1);
+  uji.close();
+
+  for (const d of [oldDir, baruDir, masaDepanDir, ujiDir]) fs.rmSync(d, { recursive: true, force: true });
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
