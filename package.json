@@ -23,7 +23,8 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "mdb-reader": "^3.2.0"
   },
   "devDependencies": {
     "electron": "^38.1.2",

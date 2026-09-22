@@ -170,6 +170,79 @@
     await A.refresh();
   }
 
+  /** Pilih att2000.mdb, tampilkan ringkasan isinya, lalu impor bila disetujui. */
+  async function importAtt2000(btn) {
+    const pilih = await A.busy(btn, () => A.callSafe('att2000.choose'), 'Membaca berkas...');
+    if (!pilih || !pilih.ok) return;
+    const p = pilih.preview;
+    const angka = (n) => Number(n || 0).toLocaleString('id-ID');
+    const kosong = !p.employees.total && !p.logs.total && !p.shifts && !p.leaves && !p.holidays && !p.departments;
+
+    const baris = [
+      ['Karyawan', p.employees.total, `${angka(p.employees.baru)} baru, ${angka(p.employees.sudahAda)} PIN sudah ada (dilewati)`],
+      ['Log scan', p.logs.total, p.logs.total
+        ? `${A.fmt.dateTime(p.logs.dari)} s/d ${A.fmt.dateTime(p.logs.sampai)}` +
+          (p.logs.tanpaKaryawan ? ` • ${angka(p.logs.tanpaKaryawan)} tanpa data karyawan (dilewati)` : '')
+        : ''],
+      ['Departemen', p.departments, 'Dipasangkan lewat nama bila sudah ada'],
+      ['Shift', p.shifts, 'Dilewati bila namanya sudah ada'],
+      ['Jenis izin', p.leaveTypes, 'Dilewati bila namanya sudah ada'],
+      ['Izin & cuti', p.leaves, 'Disimpan dengan status Disetujui'],
+      ['Hari libur', p.holidays, ''],
+    ];
+    const tabel = `<div class="table-wrap"><table class="data">
+      <thead><tr><th>Data</th><th class="r">Ditemukan</th><th>Keterangan</th></tr></thead>
+      <tbody>${baris.map(([a, n, k]) => `<tr><td><strong>${A.esc(a)}</strong></td><td class="r num">${angka(n)}</td><td class="small muted">${A.esc(k)}</td></tr>`).join('')}</tbody>
+    </table></div>`;
+
+    const lewat = [];
+    if (p.schedules) lewat.push(`${angka(p.schedules)} jadwal shift — atur ulang di halaman Jadwal Shift`);
+    if (p.fingerprints) lewat.push(`${angka(p.fingerprints)} sidik jari — ambil dari mesin lewat Sinkron Karyawan → Baca Ulang dari Mesin`);
+    if (p.machines) lewat.push(`${angka(p.machines)} mesin — daftarkan di halaman Mesin Absensi`);
+
+    const setuju = await A.modal({
+      title: 'Impor dari Att2000 / ZKTime',
+      wide: true,
+      body: `
+        <p class="small muted" style="margin-top:0">Berkas: <strong>${A.esc(pilih.filePath)}</strong></p>
+        ${kosong
+          ? `<div class="warn-bar" style="margin:0 0 12px">Berkas ini tidak berisi data karyawan maupun absensi — kemungkinan database
+              Att2000 baru yang belum pernah dipakai. Cari berkas att2000.mdb di komputer yang selama ini menjalankan software Att2000.</div>`
+          : ''}
+        ${tabel}
+        ${lewat.length ? `<p class="small" style="margin:12px 0 4px"><b>Tidak ikut diimpor:</b></p>
+          <ul class="small muted" style="margin:0;padding-left:18px">${lewat.map((x) => `<li>${A.esc(x)}</li>`).join('')}</ul>` : ''}
+        <p class="small muted" style="margin:12px 0 0">Sebelum impor, aplikasi membuat backup data yang sedang dipakai.</p>`,
+      footer: `<button data-close>Batal</button>
+        <button class="btn-primary" data-ok${kosong ? ' disabled' : ''}>Impor Sekarang</button>`,
+      onOpen: (box) => {
+        A.$('[data-ok]', box).addEventListener('click', () => A.closeModal(true));
+      },
+    });
+    if (!setuju) return;
+
+    const hasil = await A.busy(btn, () => A.callSafe('att2000.import', { filePath: pilih.filePath }), 'Mengimpor...');
+    if (!hasil) return;
+    await A.modal({
+      title: 'Impor Selesai',
+      body: `<div class="table-wrap"><table class="data"><tbody>
+        <tr><td>Karyawan baru</td><td class="r num"><strong>${angka(hasil.employees)}</strong></td></tr>
+        <tr><td>Karyawan dilewati (PIN sudah ada)</td><td class="r num">${angka(hasil.employeesSkipped)}</td></tr>
+        <tr><td>Log scan baru</td><td class="r num"><strong>${angka(hasil.logs)}</strong></td></tr>
+        <tr><td>Log scan dilewati (sudah ada / tanpa karyawan)</td><td class="r num">${angka(hasil.logsDuplicate + hasil.logsUnknown)}</td></tr>
+        <tr><td>Departemen baru</td><td class="r num">${angka(hasil.departments)}</td></tr>
+        <tr><td>Shift baru</td><td class="r num">${angka(hasil.shifts)}</td></tr>
+        <tr><td>Jenis izin baru</td><td class="r num">${angka(hasil.leaveTypes)}</td></tr>
+        <tr><td>Izin & cuti</td><td class="r num">${angka(hasil.leaves)}</td></tr>
+        <tr><td>Hari libur</td><td class="r num">${angka(hasil.holidays)}</td></tr>
+      </tbody></table></div>
+      <p class="small muted" style="margin:12px 0 0">Backup sebelum impor: ${A.esc(hasil.backup)}.
+        Langkah berikutnya: kirim karyawan ke mesin lewat Sinkron Karyawan, lalu periksa shift dan jadwal.</p>`,
+      footer: '<button class="btn-primary" data-close>Tutup</button>',
+    });
+    await A.refresh();
+  }
+
   A.registerPage('settings', {
     title: 'Pengaturan',
     subtitle: 'Identitas perusahaan, aturan absensi, hari libur, dan backup data',
@@ -267,6 +340,23 @@
         </div>
 
         ${backupCard(cfg, backups)}
+
+        <div class="card" data-admin>
+          <div class="card-head">
+            <div>
+              <h3>Impor dari Att2000 / ZKTime</h3>
+              <div class="sub">Pindahkan data dari software bawaan mesin ZKTeco (berkas att2000.mdb)</div>
+            </div>
+            <button class="btn-primary btn-sm" data-act="import-att">Pilih Berkas .mdb...</button>
+          </div>
+          <div class="card-body">
+            <p class="small muted" style="margin:0">
+              Yang dipindahkan: departemen, karyawan, log scan, shift, jenis izin, izin/cuti, dan hari libur.
+              Data yang sudah ada di aplikasi tidak ditimpa, dan backup dibuat otomatis sebelum impor.
+              Berkasnya biasanya ada di <code>C:\\Program Files (x86)\\Att2000\\att2000.mdb</code> pada komputer lama.
+            </p>
+          </div>
+        </div>
 
         <div class="card">
           <div class="card-head">
@@ -382,6 +472,8 @@
             await A.refresh();
           }, 'Memproses...');
         },
+
+        'import-att': (d, btn) => importAtt2000(btn),
 
         'add-holiday': () => holidayDialog(),
 

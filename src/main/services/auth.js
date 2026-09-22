@@ -321,6 +321,8 @@ const ADMIN_ONLY = new Set([
   'backup.remove',
   'backup.prune',
   'backup.chooseFolder',
+  'att2000.choose',
+  'att2000.import',
   'users.list',
   'users.create',
   'users.update',

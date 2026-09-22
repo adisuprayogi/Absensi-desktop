@@ -12,6 +12,7 @@ const { reports } = require('./services/reports');
 const exporter = require('./services/exporter');
 const backup = require('./services/backup');
 const { fingerprints } = require('./services/fingerprints');
+const { att2000 } = require('./services/att2000');
 const { auth, authorize } = require('./services/auth');
 const { audit } = require('./services/audit');
 const { diagnose } = require('./zk/diagnose');
@@ -299,6 +300,38 @@ function buildHandlers(manager, getWindow) {
       return true;
     },
 
+    // ------------------------------------- impor dari Att2000 / ZKTime (.mdb)
+    /** Pilih berkas att2000.mdb lalu tampilkan ringkasan isinya. */
+    'att2000.choose': async () => {
+      const result = await dialog.showOpenDialog(getWindow(), {
+        title: 'Pilih Database Att2000 / ZKTime',
+        properties: ['openFile'],
+        filters: [{ name: 'Database Access', extensions: ['mdb'] }],
+      });
+      if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true };
+      const filePath = result.filePaths[0];
+      return { ok: true, filePath, preview: await att2000.inspectFile(filePath) };
+    },
+    /** Impor setelah pengguna menyetujui ringkasan. Backup dibuat lebih dulu. */
+    'att2000.import': async ({ filePath }) => {
+      const cadangan = await backup.create({});
+      const kirim = (payload) => {
+        const win = getWindow();
+        if (win && !win.isDestroyed()) win.webContents.send('event:progress', payload);
+      };
+      const judul = 'Impor dari Att2000';
+      try {
+        const hasil = await att2000.importFile(filePath, {
+          onProgress: (fase, current = null, total = null) => kirim({ judul, fase, current, total, label: '', done: false }),
+        });
+        kirim({ judul, fase: 'Selesai', done: true });
+        return { ok: true, ...hasil, backup: cadangan.fileName };
+      } catch (err) {
+        kirim({ judul, fase: 'Gagal', done: true });
+        throw err;
+      }
+    },
+
     // ------------------------------------------------- backup & pemulihan
     'backup.list': () => backup.list(),
     'backup.folder': () => backup.folder(),
@@ -394,6 +427,7 @@ const AUDITED = {
   'device.clearAttendance': ['Kosongkan log di mesin', (p) => deviceLabel(p.id)],
   'fingerprints.remove': ['Hapus sidik jari tersimpan', (p) => (p.pins ? `PIN ${listLabel(p.pins)}` : 'semua')],
   'settings.save': ['Ubah pengaturan', (p) => Object.keys(p || {}).join(', ')],
+  'att2000.import': ['Impor dari Att2000', (p) => require('node:path').basename(String(p.filePath || ''))],
 };
 
 function employeeLabel(id) {

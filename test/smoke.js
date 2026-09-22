@@ -998,6 +998,129 @@ async function run() {
     devices.remove(devPin);
   }
 
+  // ============================== 8d4. impor dari Att2000 / ZKTime (.mdb)
+  {
+    const { att2000 } = require('../src/main/services/att2000');
+
+    // Berkas att2000.mdb sungguhan (template kosong bawaan software ZKTeco).
+    const kosong = await att2000.inspectFile(path.join(__dirname, 'fixtures', 'att2000-kosong.mdb'));
+    eq('att2000: berkas .mdb asli terbaca — karyawan', kosong.employees.total, 0);
+    eq('att2000: berkas .mdb asli terbaca — log', kosong.logs.total, 0);
+    eq('att2000: departemen puncak (perusahaan) tidak dihitung departemen', kosong.departments, 0);
+    eq('att2000: jenis izin bawaan terbaca', kosong.leaveTypes, 3);
+    let bukanMdb = null;
+    try {
+      await att2000.inspectFile(path.join(__dirname, '../src/main/db/schema.sql'));
+    } catch (err) {
+      bukanMdb = err.message;
+    }
+    check('att2000: berkas bukan Access ditolak dengan jelas', /tidak bisa dibaca sebagai database Access/.test(bukanMdb || ''), bukanMdb);
+
+    // Data tiruan berbentuk persis tabel Att2000; jam dikodekan UTC seperti mdb-reader.
+    const U = (y, m, d, h = 0, mi = 0, s = 0) => new Date(Date.UTC(y, m - 1, d, h, mi, s));
+    const tabel = {
+      DEPARTMENTS: [
+        { DEPTID: 1, DEPTNAME: '总公司', SUPDEPTID: 0 },
+        { DEPTID: 2, DEPTNAME: 'Produksi Lama', SUPDEPTID: 1 },
+      ],
+      USERINFO: [
+        { USERID: 10, Badgenumber: '5001', Name: 'Andi Lama', CardNo: '3000000001', privilege: 3, DEFAULTDEPTID: 2,
+          SSN: 'NIP-77', TITLE: 'Operator', OPHONE: '0811', HIREDDAY: U(2020, 1, 15), PASSWORD: '1234', ATT: 1 },
+        { USERID: 11, Badgenumber: '5002 ', Name: '', CardNo: '', privilege: 0, DEFAULTDEPTID: 1, ATT: 0 },
+        { USERID: 12, Badgenumber: '1', Name: 'PIN Sudah Ada', privilege: 0, ATT: 1 },
+        { USERID: 13, Badgenumber: '', Name: 'Tanpa PIN' },
+      ],
+      CHECKINOUT: [
+        { USERID: 10, CHECKTIME: U(2025, 6, 2, 8, 5, 0), CHECKTYPE: 'I', VERIFYCODE: 1 },
+        { USERID: 10, CHECKTIME: U(2025, 6, 2, 17, 1, 0), CHECKTYPE: 'O', VERIFYCODE: 1 },
+        { USERID: 11, CHECKTIME: U(2025, 6, 2, 8, 30, 0), CHECKTYPE: 'I', VERIFYCODE: 2 },
+        { USERID: 99, CHECKTIME: U(2025, 6, 2, 9, 0, 0), CHECKTYPE: 'I', VERIFYCODE: 1 },
+      ],
+      SchClass: [{ schClassid: 1, schName: 'Normal Kantor', StartTime: U(1899, 12, 30, 7, 30), EndTime: U(1899, 12, 30, 16, 30),
+        LateMinutes: 15, EarlyMinutes: 5, WorkMins: 480, Color: 255 }],
+      LeaveClass: [
+        { LeaveId: 1, LeaveName: 'Cuti Melahirkan', ReportSymbol: 'CM', Color: 0 },
+        { LeaveId: 2, LeaveName: 'Cuti', ReportSymbol: 'C' },
+        { LeaveId: 3, LeaveName: 'Absen Khusus', ReportSymbol: 'A' },
+      ],
+      USER_SPEDAY: [
+        { USERID: 10, STARTSPECDAY: U(2025, 6, 3), ENDSPECDAY: U(2025, 6, 4), DATEID: 1, YUANYING: 'melahirkan' },
+        { USERID: 11, STARTSPECDAY: U(2025, 6, 5), ENDSPECDAY: U(2025, 6, 5), DATEID: 999, YUANYING: 'dinas' },
+      ],
+      HOLIDAYS: [{ HOLIDAYID: 1, HOLIDAYNAME: 'Libur Lama', STARTTIME: U(2025, 6, 6), DURATION: 2 }],
+      TEMPLATE: [{ USERID: 10 }],
+      USER_OF_RUN: [{ USERID: 10 }],
+      Machines: [{ ID: 1 }],
+    };
+    const sumber = { has: (n) => n in tabel, rows: (n) => tabel[n] || [], count: (n) => (tabel[n] || []).length };
+
+    const pra = att2000.inspect(sumber);
+    eq('att2000 pratinjau: karyawan ber-PIN', pra.employees.total, 3);
+    eq('att2000 pratinjau: karyawan baru', pra.employees.baru, 2);
+    eq('att2000 pratinjau: PIN sudah ada', pra.employees.sudahAda, 1);
+    eq('att2000 pratinjau: tanpa PIN', pra.employees.tanpaPin, 1);
+    eq('att2000 pratinjau: rentang log dari jam asli', pra.logs.dari, '2025-06-02 08:05:00');
+    eq('att2000 pratinjau: log tanpa karyawan', pra.logs.tanpaKaryawan, 1);
+    eq('att2000 pratinjau: sidik jari dilaporkan (tidak diimpor)', pra.fingerprints, 1);
+
+    const hasilAtt = await att2000.importAll(sumber);
+    eq('att2000 impor: karyawan baru', hasilAtt.employees, 2);
+    eq('att2000 impor: PIN yang sudah ada tidak ditimpa', employees.findByPin('1').name, 'Ani Pagi');
+    const andi = employees.findByPin('5001');
+    eq('att2000 impor: nama', andi.name, 'Andi Lama');
+    eq('att2000 impor: kartu RFID 10 digit', andi.card, 3000000001);
+    eq('att2000 impor: hak akses admin Att2000 -> admin mesin', andi.privilege, 14);
+    eq('att2000 impor: NIP', andi.nip, 'NIP-77');
+    eq('att2000 impor: tanggal masuk tanpa geser zona waktu', andi.join_date, '2020-01-15');
+    eq('att2000 impor: password mesin', andi.device_password, '1234');
+    eq('att2000 impor: departemen dibuat & dipasangkan',
+      db.get().prepare('SELECT name FROM departments WHERE id = ?').get(andi.department_id).name, 'Produksi Lama');
+    const b5002 = employees.findByPin('5002');
+    check('att2000 impor: PIN dipangkas, nama kosong diberi nama cadangan', b5002 && b5002.name === 'Karyawan 5002');
+    eq('att2000 impor: ATT=0 menjadi karyawan nonaktif', b5002.active, 0);
+    eq('att2000 impor: departemen puncak = tanpa departemen', b5002.department_id, null);
+
+    eq('att2000 impor: log baru', hasilAtt.logs, 3);
+    eq('att2000 impor: log tanpa karyawan dilewati', hasilAtt.logsUnknown, 1);
+    const logAndi = db.get().prepare("SELECT ts, punch, status, source FROM attendance_logs WHERE user_pin = '5001' ORDER BY ts").all();
+    eq('att2000 impor: jam scan sama persis (tidak bergeser 7 jam)', logAndi[0].ts, '2025-06-02 08:05:00');
+    eq('att2000 impor: tipe masuk/pulang', `${logAndi[0].punch}/${logAndi[1].punch}`, '0/1');
+    eq('att2000 impor: sumber ditandai impor', logAndi[0].source, 'impor');
+    eq('att2000 impor: rekap membaca jam yang sama',
+      reports.range({ from: '2025-06-02', to: '2025-06-02', employeeIds: [andi.id] }).rows[0].check_in, '08:05');
+
+    const shiftAtt = shifts.list().find((s) => s.name === 'Normal Kantor');
+    check('att2000 impor: shift dengan jam & toleransi',
+      shiftAtt && shiftAtt.start_time === '07:30' && shiftAtt.end_time === '16:30' && shiftAtt.late_tolerance === 15 && shiftAtt.early_tolerance === 5,
+      JSON.stringify(shiftAtt));
+    eq('att2000 impor: istirahat dari selisih jam kerja', shiftAtt.break_minutes, 60);
+    eq('att2000 impor: warna Access BGR -> hex', shiftAtt.color, '#ff0000');
+
+    const jenis = leaveTypes.list();
+    eq('att2000 impor: jenis izin baru', hasilAtt.leaveTypes, 2);
+    check('att2000 impor: jenis yang namanya sudah ada tidak digandakan', jenis.filter((t) => t.name === 'Cuti').length === 1);
+    eq('att2000 impor: simbol yang bentrok status rekap diganti', jenis.find((t) => t.name === 'Absen Khusus').code, 'I3');
+    const izinAndi = leaves.list({ employeeId: andi.id })[0];
+    check('att2000 impor: izin/cuti dengan rentang tanggal',
+      izinAndi && izinAndi.start_date === '2025-06-03' && izinAndi.end_date === '2025-06-04' && izinAndi.leave_type_code === 'CM');
+    eq('att2000 impor: "dinas luar" Att2000 -> Dinas Luar', leaves.list({ employeeId: b5002.id })[0].leave_type_code, 'DL');
+    eq('att2000 impor: hari libur sesuai durasi', hasilAtt.holidays, 2);
+
+    const ulang = await att2000.importAll(sumber);
+    check('att2000 impor ulang: tidak ada data ganda',
+      !ulang.employees && !ulang.logs && !ulang.leaves && !ulang.shifts && !ulang.leaveTypes && !ulang.departments && !ulang.holidays,
+      JSON.stringify(ulang));
+
+    // Bersihkan supaya pengujian berikutnya tidak terpengaruh.
+    db.get().prepare("DELETE FROM attendance_logs WHERE user_pin IN ('5001', '5002')").run();
+    employees.remove(andi.id);
+    employees.remove(b5002.id);
+    db.get().prepare("DELETE FROM holidays WHERE name = 'Libur Lama'").run();
+    shifts.remove(shiftAtt.id);
+    for (const t of jenis.filter((x) => ['Cuti Melahirkan', 'Absen Khusus'].includes(x.name))) leaveTypes.remove(t.id);
+    db.get().prepare("DELETE FROM departments WHERE name = 'Produksi Lama'").run();
+  }
+
   // ================================================ 8e. login & hak akses
   {
     const { auth, authorize, verifySecret } = require('../src/main/services/auth');

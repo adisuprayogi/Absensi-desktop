@@ -177,7 +177,9 @@
                 {
                   label: 'Sumber', className: 'c',
                   render: (r) =>
-                    r.source === 'realtime'
+                    r.source === 'impor'
+                      ? '<span class="badge" style="background:#0ea5e9">Impor</span>'
+                      : r.source === 'realtime'
                       ? '<span class="badge" style="background:#10b981">Realtime</span>'
                       : String(r.source).startsWith('manual')
                         ? '<span class="badge" style="background:#8b5cf6">Manual</span>'

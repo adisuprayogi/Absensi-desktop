@@ -401,6 +401,19 @@ berkas `sebelum-pulih-...` untuk kembali ke keadaan sebelumnya.
 
 Menghapus aplikasi (uninstall) **tidak** menghapus database maupun backup.
 
+### Impor dari Att2000 / ZKTime
+
+Data dari software bawaan ZKTeco (berkas `att2000.mdb`) bisa dipindahkan
+lewat **Pengaturan → Impor dari Att2000 / ZKTime** (khusus Admin). Tidak perlu
+Microsoft Access.
+
+Yang diimpor:
+- departemen, karyawan, log scan, shift, jenis izin, izin/cuti, dan hari libur;
+- data yang sudah ada tidak ditimpa, dan impor ulang tidak membuat data ganda;
+- backup dibuat otomatis sebelum impor.
+
+Jadwal shift bergilir, sidik jari, dan daftar mesin **tidak** diimpor.
+
 ### Memperbarui ke versi baru
 
 Jalankan installer versi baru di atas versi lama. Tidak perlu uninstall dulu.
