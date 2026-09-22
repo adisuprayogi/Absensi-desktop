@@ -69,6 +69,10 @@ bawaan mesin.
 
 ## Instalasi
 
+Unduh installer dan manual dari halaman **Releases** repo ini. Manual penggunaan
+lengkap bergambar juga tersedia di
+[`docs/Manual-Penggunaan-Absensi-Karyawan.pdf`](docs/Manual-Penggunaan-Absensi-Karyawan.pdf).
+
 1. Jalankan `Absensi-Karyawan-Setup-1.1.0.exe`
 2. Pilih folder instalasi, lalu tunggu sampai selesai
 3. Jalankan aplikasi dari Start Menu atau ikon di desktop
